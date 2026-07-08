@@ -106,6 +106,8 @@ struct State {
     dp_entered: bool,
     dp_pin: Option<String>,
     dp_hpd: Option<bool>,
+    dp_discovered: bool,            // a DisplayPort Discover Modes ACK was seen
+    dp_discover_idx: Option<usize>, // packet index of that ACK
 }
 
 /// Analyse a capture. `events[i]` corresponds to `packets[i]`.
@@ -113,7 +115,7 @@ pub fn analyze(packets: &[Packet]) -> Session {
     let mut st = State::default();
     let mut events: Vec<Option<Event>> = Vec::with_capacity(packets.len());
 
-    for p in packets {
+    for (i, p) in packets.iter().enumerate() {
         // Fall back to leading-header words for extended messages (whose `data`
         // string ends in a "N bytes ..." description) when pktData is present.
         let words = parse_data_words(&p.data).or_else(|| {
@@ -121,15 +123,25 @@ pub fn analyze(packets: &[Packet]) -> Session {
                 .then(|| parse_leading_hex(&p.data))
                 .flatten()
         });
-        let ev = step(&mut st, p, words.as_deref());
+        let ev = step(&mut st, p, i, words.as_deref());
         events.push(ev);
+    }
+
+    // DisplayPort was offered but never entered — annotate the Discover Modes
+    // ACK packet so the failure is visible in the timeline.
+    if st.dp_discovered && !st.dp_entered {
+        if let Some(idx) = st.dp_discover_idx {
+            if events[idx].is_none() {
+                events[idx] = Some(ev("🖥️", "DisplayPort discovered but not entered"));
+            }
+        }
     }
 
     let contract = st
         .active
         .clone()
         .or_else(|| st.last.map(|c| format!("{c} (dropped)")));
-    let display = st.dp_entered.then(|| {
+    let display = if st.dp_entered {
         let mut s = "DisplayPort".to_string();
         if let Some(pin) = &st.dp_pin {
             s.push_str(&format!(" — pin {pin}"));
@@ -137,8 +149,14 @@ pub fn analyze(packets: &[Packet]) -> Session {
         if let Some(hpd) = st.dp_hpd {
             s.push_str(&format!(", HPD {}", if hpd { "high" } else { "low" }));
         }
-        s
-    });
+        Some(s)
+    } else if st.dp_discovered {
+        // The display advertised DisplayPort but the port never entered it —
+        // often because the cable can't carry it (e.g. a USB 2.0 cable).
+        Some("advertised by display but not entered".to_string())
+    } else {
+        None
+    };
 
     Session {
         events,
@@ -152,7 +170,7 @@ pub fn analyze(packets: &[Packet]) -> Session {
     }
 }
 
-fn step(st: &mut State, p: &Packet, words: Option<&[u32]>) -> Option<Event> {
+fn step(st: &mut State, p: &Packet, idx: usize, words: Option<&[u32]>) -> Option<Event> {
     // VBUS attach/detach events carry no PD message.
     match p.ok.as_str() {
         "VBUS_UP" => return Some(ev("🟢", "Attach (VBUS up)")),
@@ -226,7 +244,7 @@ fn step(st: &mut State, p: &Packet, words: Option<&[u32]>) -> Option<Event> {
                 _ => None,
             }
         }
-        "VENDOR_DEFINED" => vdm_event(st, p, words),
+        "VENDOR_DEFINED" => vdm_event(st, p, idx, words),
         "ENTER_USB" if words.len() > 1 => {
             let mode = match bits(words[1], 30, 28) {
                 0 => "USB 2.0",
@@ -314,7 +332,7 @@ fn describe_request(st: &State, words: &[u32]) -> String {
 
 /// Dispatch a VENDOR_DEFINED (structured VDM) message to the relevant event:
 /// alternate-mode entry, DisplayPort configuration, or Discover Identity.
-fn vdm_event(st: &mut State, p: &Packet, words: &[u32]) -> Option<Event> {
+fn vdm_event(st: &mut State, p: &Packet, idx: usize, words: &[u32]) -> Option<Event> {
     if words.len() < 2 {
         return None;
     }
@@ -329,6 +347,10 @@ fn vdm_event(st: &mut State, p: &Packet, words: &[u32]) -> Option<Event> {
     // Track DisplayPort alt-mode state for the summary.
     if svid == 0xFF01 {
         match cmd {
+            3 if ctype == 1 => {
+                st.dp_discovered = true; // Discover Modes ACK (DP offered)
+                st.dp_discover_idx = Some(idx);
+            }
             4 if ctype == 1 => st.dp_entered = true, // Enter Mode ACK
             17 if words.len() > 2 => {
                 let pins = bits(words[2], 15, 8);
@@ -523,5 +545,40 @@ mod tests {
             s.summary.contract.as_deref(),
             Some("20 V @ 5 A (Fixed PDO 5) (dropped)")
         );
+    }
+
+    #[test]
+    fn dp_entered_summarizes_pin_and_hpd() {
+        // Enter Mode (DP) ACK, DP Configure (DP) with pin D (bit 3 -> 0x08 << 8),
+        // DP Status (DP) with HPD high (bit 7).
+        let pkts = [
+            pkt("SOP", "VENDOR_DEFINED", "OK", "0x1DAF 0xFF018043 0x140045"), // Discover Modes ACK
+            pkt("SOP", "VENDOR_DEFINED", "OK", "0x1FAF 0xFF018044"),          // Enter Mode ACK
+            pkt("SOP", "VENDOR_DEFINED", "OK", "0x21AF 0xFF018051 0x800"),    // DP Configure, pin D
+            pkt("SOP", "VENDOR_DEFINED", "OK", "0x23AF 0xFF018050 0x80"),     // DP Status, HPD high
+        ];
+        let s = analyze(&pkts);
+        assert_eq!(
+            s.summary.display.as_deref(),
+            Some("DisplayPort — pin D, HPD high")
+        );
+    }
+
+    #[test]
+    fn dp_discovered_but_not_entered() {
+        // DisplayPort modes are discovered but never entered (e.g. a cable that
+        // can't carry DP) — surfaced in the summary and as an event.
+        let pkts = [
+            pkt("SOP", "VENDOR_DEFINED", "OK", "0x1DAF 0xFF018043 0x140045"), // Discover Modes ACK
+            pkt("SOP", "SOURCE_CAPABILITIES", "OK", "0x11A1 0x2701912C"),
+        ];
+        let s = analyze(&pkts);
+        assert_eq!(
+            s.summary.display.as_deref(),
+            Some("advertised by display but not entered")
+        );
+        assert!(s.events[0]
+            .as_ref()
+            .is_some_and(|e| e.text == "DisplayPort discovered but not entered"));
     }
 }
