@@ -1,0 +1,30 @@
+[package]
+name = "cedar"
+version = "0.1.0"
+description = "Command-line capture tool for the Cypress/Infineon CY4500 EZ-PD Protocol Analyzer"
+repository = "https://github.com/FrameworkComputer/cedar"
+readme = "README.md"
+license = "BSD-3-Clause"
+edition = "2021"
+rust-version = "1.74"
+
+[[bin]]
+name = "cedar"
+path = "src/main.rs"
+
+[dependencies]
+rusb = "0.9"
+clap = { version = "4.5", features = ["derive"] }
+ctrlc = "3.4"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+anyhow = "1.0"
+log = "0.4"
+env_logger = "0.11"
+
+# On Windows there is no system libusb, so build the bundled copy from source.
+# On Linux/macOS we link the system libusb (installed via the package manager).
+[target.'cfg(windows)'.dependencies]
+rusb = { version = "0.9", features = ["vendored"] }
+
+[profile.release]
+lto = true

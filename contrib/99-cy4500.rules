@@ -1,0 +1,11 @@
+# Give the logged-in user access to the CY4500 EZ-PD Protocol Analyzer so
+# `cedar` can capture without root.
+#
+# Install with:
+#   sudo cp contrib/99-cy4500.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+# Then replug the analyzer.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="04b4", ATTRS{idProduct}=="f67e", MODE="0660", TAG+="uaccess"
+# Firmware-update mode (before the capture firmware is loaded).
+SUBSYSTEM=="usb", ATTRS{idVendor}=="04b4", ATTRS{idProduct}=="0078", MODE="0660", TAG+="uaccess"

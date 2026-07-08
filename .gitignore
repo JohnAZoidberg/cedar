@@ -1,0 +1,6 @@
+/target
+# Captures produced while testing; never commit these. Scoped to the repo root
+# so src/report_template.html and test fixtures stay tracked.
+/*.ccgx3
+/*.csv
+/*.html
