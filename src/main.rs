@@ -41,6 +41,18 @@ enum Command {
         no_scope: bool,
     },
 
+    /// Re-decode existing .ccgx3 capture(s) into an HTML report.
+    Report {
+        /// Capture files to include (each becomes a section in the report).
+        #[arg(required = true)]
+        inputs: Vec<PathBuf>,
+
+        /// Output HTML file. Defaults to the input name with a .html extension
+        /// (or report.html for multiple inputs).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+
     /// List attached CY4500 analyzers.
     List,
 
@@ -75,12 +87,43 @@ fn run() -> Result<()> {
     match cli.command {
         Command::List => capture::list_devices(),
         Command::Version => print_version(),
+        Command::Report { inputs, output } => report_captures(&inputs, output),
         Command::Record {
             output,
             format,
             no_scope,
         } => record(&output, format, !no_scope),
     }
+}
+
+fn report_captures(inputs: &[PathBuf], output: Option<PathBuf>) -> Result<()> {
+    // Read each capture into owned packet/scope lists, then borrow into datasets.
+    let mut loaded = Vec::new();
+    for input in inputs {
+        let (packets, scope) = cedar::reader::read_ccgx3(input)?;
+        let label = input
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("capture")
+            .to_string();
+        loaded.push((label, packets, scope));
+    }
+    let datasets: Vec<report::Dataset> = loaded
+        .iter()
+        .map(|(label, packets, scope)| report::Dataset {
+            label: label.clone(),
+            packets,
+            scope,
+        })
+        .collect();
+
+    let out = output.unwrap_or_else(|| match inputs {
+        [single] => single.with_extension("html"),
+        _ => PathBuf::from("report.html"),
+    });
+    report::write_html(&out, &datasets)?;
+    println!("Wrote {} ({} capture(s))", out.display(), datasets.len());
+    Ok(())
 }
 
 fn print_version() -> Result<()> {
@@ -145,6 +188,7 @@ fn write_outputs(output: &Path, format: Format, decoder: &Decoder) -> Result<()>
             let ds = vec![report::Dataset {
                 label: html_label,
                 packets: &decoder.packets,
+                scope: &decoder.scope,
             }];
             report::write_html(output, &ds)?;
             println!("Wrote {}", output.display());
@@ -165,6 +209,7 @@ fn write_outputs(output: &Path, format: Format, decoder: &Decoder) -> Result<()>
             let ds = vec![report::Dataset {
                 label: html_label,
                 packets: &decoder.packets,
+                scope: &decoder.scope,
             }];
             report::write_html(&html, &ds)?;
             println!(

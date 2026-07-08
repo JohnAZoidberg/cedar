@@ -7,5 +7,6 @@ pub mod java_serial;
 pub mod pd_decode;
 pub mod pd_session;
 pub mod protocol;
+pub mod reader;
 pub mod report;
 pub mod writer;

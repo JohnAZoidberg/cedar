@@ -39,9 +39,11 @@ fn main() {
 
     let session = analyze(&packets);
     println!("SUMMARY");
-    println!("  cable:    {:?}", session.summary.cable);
-    println!("  partner:  {:?}", session.summary.partner);
-    println!("  contract: {:?}", session.summary.contract);
+    println!("  cable:        {:?}", session.summary.cable);
+    println!("  partner:      {:?}", session.summary.partner);
+    println!("  manufacturer: {:?}", session.summary.manufacturer);
+    println!("  display:      {:?}", session.summary.display);
+    println!("  contract:     {:?}", session.summary.contract);
     println!("\nEVENTS");
     for (i, ev) in session.events.iter().enumerate() {
         if let Some(e) = ev {

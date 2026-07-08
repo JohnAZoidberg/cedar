@@ -337,6 +337,350 @@ pub fn serialize_scope(scope: &[GraphSample]) -> Vec<u8> {
     s.buf
 }
 
+// ---------------------------------------------------------------- reader
+
+use anyhow::{bail, Result};
+
+/// A slot in the deserialization handle table.
+#[derive(Clone)]
+enum Handle {
+    Str(String),
+    Class(ClassDesc),
+    Other,
+}
+
+/// Minimal class descriptor: name plus (type-code, field-name) pairs.
+#[derive(Clone)]
+struct ClassDesc {
+    name: String,
+    fields: Vec<(u8, String)>,
+}
+
+/// A decoded field value we care about (strings and byte arrays); everything
+/// else is consumed but discarded.
+enum Val {
+    Null,
+    Str(String),
+    Bytes(Vec<u8>),
+    Other,
+}
+
+/// A cursor over a Java `ObjectOutputStream` byte stream, tracking the handle
+/// table so back-references resolve. Only the subset of the grammar used by the
+/// analyzer's captures is implemented.
+struct Reader<'a> {
+    data: &'a [u8],
+    pos: usize,
+    handles: Vec<Handle>,
+}
+
+impl<'a> Reader<'a> {
+    fn new(data: &'a [u8]) -> Result<Self> {
+        let mut r = Reader {
+            data,
+            pos: 0,
+            handles: Vec::new(),
+        };
+        if r.u16()? != STREAM_MAGIC || r.u16()? != STREAM_VERSION {
+            bail!("not a Java serialization stream");
+        }
+        Ok(r)
+    }
+
+    fn u8(&mut self) -> Result<u8> {
+        let b = *self.data.get(self.pos).ok_or_else(eof)?;
+        self.pos += 1;
+        Ok(b)
+    }
+    fn u16(&mut self) -> Result<u16> {
+        Ok(((self.u8()? as u16) << 8) | self.u8()? as u16)
+    }
+    fn i32(&mut self) -> Result<i32> {
+        let mut v = 0i32;
+        for _ in 0..4 {
+            v = (v << 8) | self.u8()? as i32;
+        }
+        Ok(v)
+    }
+    fn i64(&mut self) -> Result<i64> {
+        let mut v = 0i64;
+        for _ in 0..8 {
+            v = (v << 8) | self.u8()? as i64;
+        }
+        Ok(v)
+    }
+    fn take(&mut self, n: usize) -> Result<Vec<u8>> {
+        let end = self.pos.checked_add(n).ok_or_else(eof)?;
+        let s = self.data.get(self.pos..end).ok_or_else(eof)?.to_vec();
+        self.pos = end;
+        Ok(s)
+    }
+    fn utf(&mut self) -> Result<String> {
+        let n = self.u16()? as usize;
+        Ok(String::from_utf8_lossy(&self.take(n)?).into_owned())
+    }
+    fn expect(&mut self, tc: u8) -> Result<()> {
+        let got = self.u8()?;
+        if got != tc {
+            bail!(
+                "expected tag {tc:#x}, got {got:#x} at offset {}",
+                self.pos - 1
+            );
+        }
+        Ok(())
+    }
+    fn ref_index(&mut self) -> Result<usize> {
+        let h = self.i32()? as u32;
+        Ok((h.wrapping_sub(BASE_WIRE_HANDLE)) as usize)
+    }
+
+    /// Read a class descriptor (new, a back-reference, or null).
+    fn class_desc(&mut self) -> Result<ClassDesc> {
+        match self.u8()? {
+            TC_NULL => Ok(ClassDesc {
+                name: String::new(),
+                fields: Vec::new(),
+            }),
+            TC_REFERENCE => {
+                let h = self.ref_index()?;
+                match self.handles.get(h) {
+                    Some(Handle::Class(c)) => Ok(c.clone()),
+                    _ => bail!("bad class reference"),
+                }
+            }
+            TC_CLASSDESC => {
+                let name = self.utf()?;
+                let _suid = self.i64()?;
+                let _flags = self.u8()?;
+                let nfields = self.u16()?;
+                let idx = self.handles.len();
+                self.handles.push(Handle::Other); // reserve class handle
+                let mut fields = Vec::with_capacity(nfields as usize);
+                for _ in 0..nfields {
+                    let tc = self.u8()?;
+                    let fname = self.utf()?;
+                    if tc == b'L' || tc == b'[' {
+                        self.read_string()?; // field type signature (consumes a handle)
+                    }
+                    fields.push((tc, fname));
+                }
+                self.expect(TC_ENDBLOCKDATA)?;
+                let cd = ClassDesc { name, fields };
+                self.handles[idx] = Handle::Class(cd.clone());
+                self.class_desc()?; // superclass (TC_NULL in our data)
+                Ok(cd)
+            }
+            other => bail!("expected class descriptor, got tag {other:#x}"),
+        }
+    }
+
+    fn read_string(&mut self) -> Result<Option<String>> {
+        match self.u8()? {
+            TC_NULL => Ok(None),
+            TC_STRING => {
+                let s = self.utf()?;
+                self.handles.push(Handle::Str(s.clone()));
+                Ok(Some(s))
+            }
+            TC_REFERENCE => {
+                let h = self.ref_index()?;
+                match self.handles.get(h) {
+                    Some(Handle::Str(s)) => Ok(Some(s.clone())),
+                    _ => bail!("bad string reference"),
+                }
+            }
+            other => bail!("expected string, got tag {other:#x}"),
+        }
+    }
+
+    /// Read one object/array field value (the `L`/`[` field types).
+    fn read_value(&mut self) -> Result<Val> {
+        match self.u8()? {
+            TC_NULL => Ok(Val::Null),
+            TC_STRING => {
+                let s = self.utf()?;
+                self.handles.push(Handle::Str(s.clone()));
+                Ok(Val::Str(s))
+            }
+            TC_REFERENCE => {
+                let h = self.ref_index()?;
+                match self.handles.get(h) {
+                    Some(Handle::Str(s)) => Ok(Val::Str(s.clone())),
+                    _ => Ok(Val::Other),
+                }
+            }
+            TC_ARRAY => {
+                let _cd = self.class_desc()?;
+                self.handles.push(Handle::Other);
+                let len = self.i32()? as usize;
+                Ok(Val::Bytes(self.take(len)?))
+            }
+            TC_OBJECT => {
+                let cd = self.class_desc()?;
+                self.handles.push(Handle::Other);
+                match cd.name.as_str() {
+                    "java.util.ArrayList" => {
+                        let size = self.i32()?;
+                        self.expect(TC_BLOCKDATA)?;
+                        let _blen = self.u8()?;
+                        let _cap = self.i32()?;
+                        for _ in 0..size {
+                            self.read_value()?; // nested elements (empty in our data)
+                        }
+                        self.expect(TC_ENDBLOCKDATA)?;
+                        Ok(Val::Other)
+                    }
+                    _ => {
+                        // Generic object: consume its declared fields.
+                        for (tc, _) in cd.fields.clone() {
+                            self.read_field(tc)?;
+                        }
+                        Ok(Val::Other)
+                    }
+                }
+            }
+            other => bail!("unexpected value tag {other:#x}"),
+        }
+    }
+
+    /// Consume a single field value of the given type code.
+    fn read_field(&mut self, tc: u8) -> Result<Val> {
+        match tc {
+            b'Z' | b'B' => {
+                self.u8()?;
+                Ok(Val::Other)
+            }
+            b'C' | b'S' => {
+                self.u16()?;
+                Ok(Val::Other)
+            }
+            b'I' | b'F' => {
+                self.i32()?;
+                Ok(Val::Other)
+            }
+            b'J' | b'D' => {
+                self.i64()?;
+                Ok(Val::Other)
+            }
+            b'L' | b'[' => self.read_value(),
+            other => bail!("unknown field type {other}"),
+        }
+    }
+
+    /// Read the `TC_OBJECT` ArrayList wrapper and its elements via `elem`.
+    fn read_list<T>(&mut self, mut elem: impl FnMut(&mut Self) -> Result<T>) -> Result<Vec<T>> {
+        self.expect(TC_OBJECT)?;
+        let _cd = self.class_desc()?; // java.util.ArrayList
+        self.handles.push(Handle::Other);
+        let size = self.i32()?;
+        self.expect(TC_BLOCKDATA)?;
+        let _blen = self.u8()?;
+        let _cap = self.i32()?;
+        let mut out = Vec::with_capacity(size.max(0) as usize);
+        for _ in 0..size {
+            out.push(elem(self)?);
+        }
+        self.expect(TC_ENDBLOCKDATA)?;
+        Ok(out)
+    }
+
+    /// Read one object, returning its object fields as a name→value map.
+    fn read_object_fields(&mut self) -> Result<HashMap<String, Val>> {
+        self.expect(TC_OBJECT)?;
+        let cd = self.class_desc()?;
+        self.handles.push(Handle::Other);
+        let mut map = HashMap::new();
+        for (tc, name) in cd.fields.clone() {
+            let v = self.read_field(tc)?;
+            if matches!(tc, b'L' | b'[') {
+                map.insert(name, v);
+            }
+        }
+        Ok(map)
+    }
+
+    /// Read one object, returning its primitive fields as a name→i64 map.
+    fn read_object_prims(&mut self) -> Result<HashMap<String, i64>> {
+        self.expect(TC_OBJECT)?;
+        let cd = self.class_desc()?;
+        self.handles.push(Handle::Other);
+        let mut map = HashMap::new();
+        for (tc, name) in cd.fields.clone() {
+            let v = match tc {
+                b'Z' | b'B' => self.u8()? as i64,
+                b'C' | b'S' => self.u16()? as i16 as i64,
+                b'I' => self.i32()? as i64,
+                b'J' => self.i64()?,
+                b'L' | b'[' => {
+                    self.read_value()?;
+                    continue;
+                }
+                other => bail!("unknown field type {other}"),
+            };
+            map.insert(name, v);
+        }
+        Ok(map)
+    }
+}
+
+fn eof() -> anyhow::Error {
+    anyhow::anyhow!("unexpected end of serialized stream")
+}
+
+/// Deserialize `ezpd_last.part` into packets.
+pub fn read_packets(bytes: &[u8]) -> Result<Vec<Packet>> {
+    let mut r = Reader::new(bytes)?;
+    r.read_list(|r| {
+        let f = r.read_object_fields()?;
+        let s = |k: &str| match f.get(k) {
+            Some(Val::Str(v)) => v.clone(),
+            _ => String::new(),
+        };
+        let delta = match f.get("delta") {
+            Some(Val::Str(v)) => Some(v.clone()),
+            _ => None,
+        };
+        let pkt_data = match f.get("pktData") {
+            Some(Val::Bytes(b)) => b.clone(),
+            _ => Vec::new(),
+        };
+        Ok(Packet {
+            sno: s("sno"),
+            ok: s("ok"),
+            sop: s("sop"),
+            msg: s("msg"),
+            id: s("id"),
+            d_role: s("dRole"),
+            p_role: s("pRole"),
+            count: s("count"),
+            rev: s("rev"),
+            duration: s("duration"),
+            delta,
+            vbus: s("vbus"),
+            data: s("data"),
+            s_time: s("sTime"),
+            e_time: s("eTime"),
+            pkt_data,
+        })
+    })
+}
+
+/// Deserialize `ezpd_scope.scope` into scope samples.
+pub fn read_scope(bytes: &[u8]) -> Result<Vec<GraphSample>> {
+    let mut r = Reader::new(bytes)?;
+    r.read_list(|r| {
+        let p = r.read_object_prims()?;
+        let g = |k: &str| p.get(k).copied().unwrap_or(0);
+        Ok(GraphSample {
+            cc1: g("cc1") as i16,
+            cc2: g("cc2") as i16,
+            amp: g("amp") as i16,
+            volt: g("volt") as i16,
+            time_stamp: g("timeStamp"),
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,5 +696,91 @@ mod tests {
     fn empty_packet_stream_has_header() {
         let out = serialize_packets(&[]);
         assert_eq!(&out[..4], &[0xac, 0xed, 0x00, 0x05]);
+    }
+
+    #[test]
+    fn packets_round_trip() {
+        let pkts = vec![
+            Packet {
+                sno: "1".into(),
+                ok: "VBUS_UP".into(),
+                sop: "SOP".into(),
+                msg: "C_RSVD0".into(),
+                id: "0".into(),
+                d_role: "UFP".into(),
+                p_role: "SNK".into(),
+                count: "0".into(),
+                rev: "v1".into(),
+                duration: "0".into(),
+                delta: None,
+                vbus: "5,000".into(),
+                data: "0x0".into(),
+                s_time: "26".into(),
+                e_time: "26".into(),
+                pkt_data: vec![1, 2, 3, 4, 5, 6],
+            },
+            Packet {
+                sno: "3".into(),
+                ok: "OK".into(),
+                sop: "SOP".into(),
+                msg: "SOURCE_CAPABILITIES".into(),
+                id: "1".into(),
+                d_role: "DFP".into(),
+                p_role: "SRC".into(),
+                count: "7".into(),
+                rev: "v3".into(),
+                duration: "1,376".into(),
+                delta: Some("7,190".into()),
+                vbus: "19,800".into(),
+                data: "0x71A1 0xA81912C".into(),
+                s_time: "1000".into(),
+                e_time: "2376".into(),
+                pkt_data: (0..48).collect(),
+            },
+        ];
+        let bytes = serialize_packets(&pkts);
+        let back = read_packets(&bytes).unwrap();
+        assert_eq!(back.len(), pkts.len());
+        for (a, b) in pkts.iter().zip(&back) {
+            assert_eq!(a.sno, b.sno);
+            assert_eq!(a.ok, b.ok);
+            assert_eq!(a.msg, b.msg);
+            assert_eq!(a.data, b.data);
+            assert_eq!(a.vbus, b.vbus);
+            assert_eq!(a.delta, b.delta);
+            assert_eq!(a.s_time, b.s_time);
+            assert_eq!(a.e_time, b.e_time);
+            assert_eq!(a.pkt_data, b.pkt_data);
+        }
+    }
+
+    #[test]
+    fn scope_round_trip() {
+        let scope = vec![
+            GraphSample {
+                cc1: 1657,
+                cc2: 0,
+                amp: 250,
+                volt: 19800,
+                time_stamp: 876,
+            },
+            GraphSample {
+                cc1: -5,
+                cc2: 3,
+                amp: 1208,
+                volt: 19600,
+                time_stamp: 5_995_974,
+            },
+        ];
+        let bytes = serialize_scope(&scope);
+        let back = read_scope(&bytes).unwrap();
+        assert_eq!(back.len(), scope.len());
+        for (a, b) in scope.iter().zip(&back) {
+            assert_eq!(a.cc1, b.cc1);
+            assert_eq!(a.cc2, b.cc2);
+            assert_eq!(a.amp, b.amp);
+            assert_eq!(a.volt, b.volt);
+            assert_eq!(a.time_stamp, b.time_stamp);
+        }
     }
 }

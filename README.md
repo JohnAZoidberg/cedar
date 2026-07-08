@@ -18,8 +18,15 @@ Output is **format-compatible with the original tool**:
 - **`.csv`** — the same columns the original utility's CSV/Excel export
   produces.
 - **`.html`** — a self-contained interactive report: a per-capture summary
-  (cable, port partner, negotiated contract), a VBUS-over-time chart, and a
-  filterable packet table where each row expands to the full USB-PD decode
+  (cable, port partner, negotiated contract), a per-packet VBUS chart, an
+  oscilloscope chart with VBUS / current / power over time (stacked, from the
+  scope trace), and a filterable packet table (with a **VDM** column summarizing
+  each vendor-defined message, e.g. `Enter Mode (DP) ACK`,
+  `DP Status (DP) — HPD high`, `DP Configure (DP) — pin D`) where each row
+  expands to the full
+  USB-PD decode (including the payloads of extended/informational messages —
+  source/sink extended capabilities, battery capabilities/status, status, and
+  manufacturer info — which cedar decodes from the captured `pktData`)
   (message header, PDOs, RDOs, VDMs, extended messages) plus the raw data words.
   An **event** column annotates the packets where something significant happens
   (attach/detach, cable/partner discovered, contract established/changed/dropped,
@@ -45,6 +52,12 @@ tools); no extra setup is required.
 ## Usage
 
 ```sh
+# Re-decode existing capture(s) into an HTML report (no device needed).
+# Reads .ccgx3 from cedar or the original utility. Multiple inputs become
+# sections in one report (handy for comparing captures).
+cedar report capture.ccgx3                    # writes capture.html
+cedar report a.ccgx3 b.ccgx3 -o compare.html
+
 # List attached analyzers
 cedar list
 

@@ -6,7 +6,7 @@
 //!
 //! Both the live capture display and the HTML report consume this.
 
-use crate::pd_decode::{bit, bits, parse_data_words};
+use crate::pd_decode::{bit, bits, parse_data_words, parse_leading_hex, pin_letters};
 use crate::protocol::Packet;
 
 /// A significant transition, annotating one packet.
@@ -21,6 +21,11 @@ pub struct Event {
 pub struct Summary {
     pub cable: Option<String>,
     pub partner: Option<String>,
+    /// Vendor from a MANUFACTURER_INFO response (often the local device, which
+    /// can differ from the Discover-Identity partner).
+    pub manufacturer: Option<String>,
+    /// DisplayPort alt-mode state, if entered (pin assignment + HPD).
+    pub display: Option<String>,
     /// The current contract, or the last one seen with a "(dropped)" note.
     pub contract: Option<String>,
 }
@@ -97,6 +102,10 @@ struct State {
     epr_active: bool,
     cable: Option<String>,
     partner: Option<String>,
+    manufacturer: Option<String>,
+    dp_entered: bool,
+    dp_pin: Option<String>,
+    dp_hpd: Option<bool>,
 }
 
 /// Analyse a capture. `events[i]` corresponds to `packets[i]`.
@@ -105,7 +114,13 @@ pub fn analyze(packets: &[Packet]) -> Session {
     let mut events: Vec<Option<Event>> = Vec::with_capacity(packets.len());
 
     for p in packets {
-        let words = parse_data_words(&p.data);
+        // Fall back to leading-header words for extended messages (whose `data`
+        // string ends in a "N bytes ..." description) when pktData is present.
+        let words = parse_data_words(&p.data).or_else(|| {
+            (!p.pkt_data.is_empty())
+                .then(|| parse_leading_hex(&p.data))
+                .flatten()
+        });
         let ev = step(&mut st, p, words.as_deref());
         events.push(ev);
     }
@@ -114,11 +129,24 @@ pub fn analyze(packets: &[Packet]) -> Session {
         .active
         .clone()
         .or_else(|| st.last.map(|c| format!("{c} (dropped)")));
+    let display = st.dp_entered.then(|| {
+        let mut s = "DisplayPort".to_string();
+        if let Some(pin) = &st.dp_pin {
+            s.push_str(&format!(" — pin {pin}"));
+        }
+        if let Some(hpd) = st.dp_hpd {
+            s.push_str(&format!(", HPD {}", if hpd { "high" } else { "low" }));
+        }
+        s
+    });
+
     Session {
         events,
         summary: Summary {
             cable: st.cable,
             partner: st.partner,
+            manufacturer: st.manufacturer,
+            display,
             contract,
         },
     }
@@ -198,8 +226,46 @@ fn step(st: &mut State, p: &Packet, words: Option<&[u32]>) -> Option<Event> {
                 _ => None,
             }
         }
-        "VENDOR_DEFINED" => discover_identity(st, p, words),
+        "VENDOR_DEFINED" => vdm_event(st, p, words),
+        "ENTER_USB" if words.len() > 1 => {
+            let mode = match bits(words[1], 30, 28) {
+                0 => "USB 2.0",
+                1 => "USB 3.2",
+                2 => "USB4",
+                _ => "USB",
+            };
+            Some(ev("🔗", format!("Enter USB: {mode}")))
+        }
+        "MANUFACTURER_INFO" => {
+            let mfr = manufacturer_string(&p.pkt_data)?;
+            if st.manufacturer.is_some() {
+                return None;
+            }
+            st.manufacturer = Some(mfr.clone());
+            Some(ev("🏭", format!("Manufacturer: {mfr}")))
+        }
         _ => None,
+    }
+}
+
+/// Extract the manufacturer string from a MANUFACTURER_INFO record's `pktData`
+/// (VID at offset 22, PID at 24, then a NUL-terminated string from 26).
+fn manufacturer_string(pkt: &[u8]) -> Option<String> {
+    if pkt.len() < 27 {
+        return None;
+    }
+    let ext_hdr = u16::from_le_bytes([pkt[20], pkt[21]]);
+    let data_bytes = (ext_hdr & 0x1ff) as usize;
+    let end = (22 + data_bytes).min(pkt.len());
+    if end <= 26 {
+        return None;
+    }
+    let bytes: &[u8] = pkt[26..end].split(|&b| b == 0).next().unwrap_or(&[]);
+    let s = String::from_utf8_lossy(bytes).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
     }
 }
 
@@ -243,6 +309,58 @@ fn describe_request(st: &State, words: &[u32]) -> String {
             )
         }
         None => format!("PDO {pos}"),
+    }
+}
+
+/// Dispatch a VENDOR_DEFINED (structured VDM) message to the relevant event:
+/// alternate-mode entry, DisplayPort configuration, or Discover Identity.
+fn vdm_event(st: &mut State, p: &Packet, words: &[u32]) -> Option<Event> {
+    if words.len() < 2 {
+        return None;
+    }
+    let vdm = words[1];
+    if bit(vdm, 15) == 0 {
+        return None; // unstructured VDM
+    }
+    let svid = bits(vdm, 31, 16);
+    let cmd = bits(vdm, 4, 0);
+    let ctype = bits(vdm, 7, 6);
+
+    // Track DisplayPort alt-mode state for the summary.
+    if svid == 0xFF01 {
+        match cmd {
+            4 if ctype == 1 => st.dp_entered = true, // Enter Mode ACK
+            17 if words.len() > 2 => {
+                let pins = bits(words[2], 15, 8);
+                if pins != 0 {
+                    st.dp_pin = Some(pin_letters(pins)); // DP Configure pin assignment
+                }
+            }
+            6 | 16 if words.len() > 2 => st.dp_hpd = Some(bit(words[2], 7) != 0), // DP Status/Attention
+            _ => {}
+        }
+    }
+
+    // Enter Mode ACK — an alternate mode was entered.
+    if cmd == 4 && ctype == 1 {
+        return Some(ev(
+            "🖥️",
+            format!("{} alt mode entered", alt_mode_name(svid)),
+        ));
+    }
+    // DisplayPort Configure ACK — the pin assignment / config was applied.
+    if cmd == 17 && svid == 0xFF01 && ctype == 1 {
+        return Some(ev("🖥️", "DisplayPort configured"));
+    }
+    // Discover Identity ACK — cable / partner identity.
+    discover_identity(st, p, words)
+}
+
+fn alt_mode_name(svid: u32) -> String {
+    match svid {
+        0xFF01 => "DisplayPort".to_string(),
+        0x8087 => "Thunderbolt".to_string(),
+        s => format!("SVID {s:#06x}"),
     }
 }
 

@@ -421,6 +421,24 @@ pub(crate) fn parse_data_words(data: &str) -> Option<Vec<u32>> {
     }
 }
 
+/// Parse the leading `0x`-prefixed words, stopping at the first token that is
+/// not a hex word. Extended messages render as `"0x<hdr> 0x<exthdr> N bytes
+/// ..."`; a full parse fails on the trailing description, but the header and
+/// extended header are still recoverable here (the payload comes from pktData).
+pub(crate) fn parse_leading_hex(data: &str) -> Option<Vec<u32>> {
+    let mut words = Vec::new();
+    for tok in data.split_whitespace() {
+        match tok.strip_prefix("0x").or_else(|| tok.strip_prefix("0X")) {
+            Some(hexpart) => match u64::from_str_radix(hexpart, 16) {
+                Ok(v) => words.push(v as u32),
+                Err(_) => break,
+            },
+            None => break,
+        }
+    }
+    (!words.is_empty()).then_some(words)
+}
+
 /// Rebuild the analyzer's byte layout: header at 16, objects at 20.
 fn pkt_bytes(words: &[u32]) -> Vec<u8> {
     let mut b = vec![0u8; 16];
@@ -1590,6 +1608,75 @@ fn generic_objects(words: &[u32], start: usize, label: &str) -> Vec<Detail> {
         .collect()
 }
 
+/// A one-line human summary of a Vendor Defined Message, e.g.
+/// `"Discover Identity ACK"`, `"Enter Mode (DP) REQ"`,
+/// `"DP Status (DP) ACK — HPD high"`, `"DP Configure (DP) REQ — pin D"`.
+/// Returns `None` if `words` is not a VDM.
+pub fn vdm_summary(words: &[u32]) -> Option<String> {
+    if words.len() < 2 {
+        return None;
+    }
+    let vdm = words[1];
+    let svid = bits(vdm, 31, 16);
+    if bit(vdm, 15) == 0 {
+        return Some(format!("Unstructured VDM (VID {svid:#06x})"));
+    }
+    let type_name = ["REQ", "ACK", "NAK", "BUSY"][bits(vdm, 7, 6) as usize];
+    let cmd = bits(vdm, 4, 0);
+    let cmd_name = match cmd {
+        1 => "Discover Identity",
+        2 => "Discover SVIDs",
+        3 => "Discover Modes",
+        4 => "Enter Mode",
+        5 => "Exit Mode",
+        6 => "Attention",
+        16 => "DP Status",
+        17 => "DP Configure",
+        _ => return Some(format!("VDM cmd {cmd} {type_name}")),
+    };
+    let tag = match svid {
+        0xFF01 => " (DP)",
+        0x8087 => " (TBT)",
+        _ => "",
+    };
+    let mut s = format!("{cmd_name}{tag} {type_name}");
+    // DisplayPort status/configure detail from the first VDO.
+    if svid == 0xFF01 && words.len() > 2 {
+        let vdo = words[2];
+        match cmd {
+            6 | 16 => {
+                let hpd = if bit(vdo, 7) != 0 {
+                    "HPD high"
+                } else {
+                    "HPD low"
+                };
+                let irq = if bit(vdo, 8) != 0 { ", IRQ" } else { "" };
+                s = format!("{s} — {hpd}{irq}");
+            }
+            17 => s = format!("{s} — pin {}", pin_letters(bits(vdo, 15, 8))),
+            _ => {}
+        }
+    }
+    Some(s)
+}
+
+pub(crate) fn pin_letters(mask: u32) -> String {
+    let mut out = String::new();
+    for (i, c) in "ABCDEF".chars().enumerate() {
+        if mask & (1 << i) != 0 {
+            if !out.is_empty() {
+                out.push(',');
+            }
+            out.push(c);
+        }
+    }
+    if out.is_empty() {
+        format!("{mask:#x}")
+    } else {
+        out
+    }
+}
+
 fn decode_vdm(words: &[u32], sop: &str, rev: u32) -> Vec<Detail> {
     let vdm_hdr = words[1];
     if bit(vdm_hdr, 15) == 0 {
@@ -1944,7 +2031,8 @@ fn pps_status(pkt: &[u8]) -> Vec<Detail> {
 
 fn manufacturer_info(pkt: &[u8], nwords: usize) -> Vec<Detail> {
     let end = (20 + nwords * 4).min(pkt.len());
-    let slice = &pkt[26.min(pkt.len())..end];
+    let start = 26.min(end); // the string may be empty (header-only fallback)
+    let slice = &pkt[start..end];
     let text_bytes: &[u8] = slice.split(|&b| b == 0).next().unwrap_or(&[]);
     let text = String::from_utf8_lossy(text_bytes).to_string();
     vec![
@@ -2037,11 +2125,97 @@ fn decode_extended(msg: usize, words: &[u32], pkt: &[u8], rev: u32) -> Vec<Detai
     out
 }
 
+/// Decode an extended message from the full assembled record bytes (`pktData`),
+/// where the payload actually lives — the `data`-word form only carries the
+/// header and extended header. The object count comes from the extended
+/// header's data-size field rather than the (truncated) word list.
+fn decode_extended_bytes(msg: usize, pkt_raw: &[u8], rev: u32) -> Vec<Detail> {
+    // Pad so the fixed-offset decoders never run off the end.
+    let mut pkt = pkt_raw.to_vec();
+    if pkt.len() < 64 {
+        pkt.resize(64, 0);
+    }
+    let ext_hdr = u16_at(&pkt, 20);
+    let data_bytes = (ext_hdr & 0x1ff) as usize;
+    let nwords = data_bytes.div_ceil(4);
+    let mut out = vec![decode_ext_header(ext_hdr)];
+    match msg {
+        1 => out.extend(source_cap_extended(&pkt)),
+        2 => out.extend(status(&pkt)),
+        3 => out.push(d("Battery Cap Ref", u8_at(&pkt, 22).to_string())),
+        4 => out.push(d("Battery Status Ref", u8_at(&pkt, 22).to_string())),
+        5 => out.extend(battery_caps(&pkt)),
+        6 => {
+            out.push(d(
+                "Manufacturer Info Target",
+                match u8_at(&pkt, 22) {
+                    0 => "Port/Cable Plug".to_string(),
+                    1 => "Battery".to_string(),
+                    v => v.to_string(),
+                },
+            ));
+            out.push(d("Manufacturer Info Ref", u8_at(&pkt, 23).to_string()));
+        }
+        7 => out.extend(manufacturer_info(&pkt, nwords)),
+        12 => out.extend(pps_status(&pkt)),
+        15 => {
+            // SKEDB shares the leading VID/PID/XID/FW/HW layout with SCEDB.
+            let sce = source_cap_extended(&pkt);
+            out.extend(sce.into_iter().take(5));
+            out.extend(payload_objects(&pkt, nwords, "SKEDB DATA OBJECT"));
+        }
+        16 => {
+            let t = u8_at(&pkt, 22);
+            out.push(ds(
+                "Extended Control Message Type",
+                hx(t),
+                vec![d("Message type", ext_ctrl_msg(t))],
+            ));
+            out.push(d("Data", hx(u8_at(&pkt, 23))));
+        }
+        17 => {
+            for i in 0..nwords {
+                out.push(decode_pdo(u32_at(&pkt, 22 + i * 4), i, rev, false));
+            }
+        }
+        18 => {
+            for i in 0..nwords {
+                out.push(decode_pdo(u32_at(&pkt, 22 + i * 4), i, rev, true));
+            }
+        }
+        _ => out.extend(payload_objects(
+            &pkt,
+            nwords,
+            &format!("{} DATA OBJECT", EXTD_MSG_TYPE[msg]),
+        )),
+    }
+    out
+}
+
+/// Build `label N` details from `nwords` 32-bit objects starting at payload
+/// offset 22 in an assembled extended-message record.
+fn payload_objects(pkt: &[u8], nwords: usize, label: &str) -> Vec<Detail> {
+    (0..nwords)
+        .map(|i| d(&format!("{} {}", label, i + 1), hx(u32_at(pkt, 22 + i * 4))))
+        .collect()
+}
+
 // ---------------------------------------------------------------- entry points
 
 /// Decode one packet's data words. Returns `None` for reset/invalid SOP or
 /// empty input, matching the reference `decode_words`.
-pub fn decode_words<F>(words: &[u32], sop: &str, supply_lookup: F) -> Option<Vec<Detail>>
+///
+/// `pkt` is the full assembled record (`pktData`) when available. Extended
+/// messages carry their payload only in those bytes (the `data` words hold just
+/// the header and extended header), so passing `pkt` lets extended messages
+/// decode fully; without it they fall back to the header-only word form (which
+/// is what the reference Python decoder produces).
+pub fn decode_words<F>(
+    words: &[u32],
+    sop: &str,
+    pkt: Option<&[u8]>,
+    supply_lookup: F,
+) -> Option<Vec<Detail>>
 where
     F: Fn(usize) -> u32,
 {
@@ -2060,7 +2234,10 @@ where
     let is_sop = sop == "SOP";
     let mut out = vec![decode_msg_header(hdr, is_sop, rev, is_ext)];
     if is_ext {
-        out.extend(decode_extended(msg, words, &pkt_bytes(words), rev));
+        match pkt {
+            Some(b) if b.len() >= 22 => out.extend(decode_extended_bytes(msg, b, rev)),
+            _ => out.extend(decode_extended(msg, words, &pkt_bytes(words), rev)),
+        }
         return Some(out);
     }
     if count == 0 || words.len() < 2 {
@@ -2121,6 +2298,16 @@ pub fn decode_capture(packets: &[Packet]) -> Vec<Option<Vec<Detail>>> {
     for p in packets {
         let words = match parse_data_words(&p.data) {
             Some(w) => w,
+            // An extended message's `data` fails a full parse (it ends in a
+            // "N bytes ..." description). When we have the raw record we can
+            // still decode it from the leading header words + pktData.
+            None if !p.pkt_data.is_empty() => match parse_leading_hex(&p.data) {
+                Some(w) => w,
+                None => {
+                    results.push(None);
+                    continue;
+                }
+            },
             None => {
                 results.push(None);
                 continue;
@@ -2141,7 +2328,8 @@ pub fn decode_capture(packets: &[Packet]) -> Vec<Option<Vec<Detail>>> {
             0
         };
 
-        results.push(decode_words(&words, &p.sop, lookup));
+        let pkt = (!p.pkt_data.is_empty()).then_some(p.pkt_data.as_slice());
+        results.push(decode_words(&words, &p.sop, pkt, lookup));
 
         let hdr = words[0];
         let rev = bits(hdr, 7, 6);
@@ -2165,4 +2353,87 @@ pub fn decode_capture(packets: &[Packet]) -> Vec<Option<Vec<Detail>>> {
         }
     }
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::Packet;
+
+    fn from_hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn ext_packet(msg: &str, data: &str, pkt_hex: &str) -> Packet {
+        Packet {
+            sno: String::new(),
+            ok: "OK".into(),
+            sop: "SOP".into(),
+            msg: msg.into(),
+            id: String::new(),
+            d_role: String::new(),
+            p_role: String::new(),
+            count: String::new(),
+            rev: String::new(),
+            duration: String::new(),
+            delta: None,
+            vbus: String::new(),
+            data: data.into(),
+            s_time: "0".into(),
+            e_time: String::new(),
+            pkt_data: from_hex(pkt_hex),
+        }
+    }
+
+    /// Walk a decode tree for a field by name and return its value.
+    fn find<'a>(details: &'a [Detail], name: &str) -> Option<&'a str> {
+        for d in details {
+            if d.n == name {
+                return Some(&d.v);
+            }
+            if let Some(v) = find(&d.s, name) {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn manufacturer_info_payload_from_pktdata() {
+        // Real MANUFACTURER_INFO from a Framework laptop capture.
+        let p = ext_packet(
+            "MANUFACTURER_INFO",
+            "0x8AA7 0xE",
+            "70000000d908000025384400343c4400a78a00800e00ac322f004672616d65776f726b00",
+        );
+        let dec = decode_capture(std::slice::from_ref(&p))[0].clone().unwrap();
+        assert_eq!(find(&dec, "Manufacturer String"), Some("Framework"));
+        assert_eq!(find(&dec, "VID"), Some("0x32ac"));
+    }
+
+    #[test]
+    fn source_cap_extended_payload_from_pktdata() {
+        // Real SOURCE_CAPABILITIES_EXTENDED; without pktData this decodes as zeros.
+        let p = ext_packet(
+            "SOURCE_CAPABILITIES_EXTENDED",
+            "0x80A1 0x19",
+            "5c000000dd0800001284420089894200a18000801900ac322f00000000000101000000020000000000000005010f00",
+        );
+        let dec = decode_capture(std::slice::from_ref(&p))[0].clone().unwrap();
+        assert_eq!(find(&dec, "VID"), Some("0x32ac"));
+        // The Source PDP node is present (proves payload was read, not zeros).
+        assert!(find(&dec, "Source PDP").is_some());
+    }
+
+    #[test]
+    fn extended_without_pktdata_still_decodes_header() {
+        // No pkt_data -> header-only fallback (matches the reference decoder).
+        let mut p = ext_packet("MANUFACTURER_INFO", "0x8AA7 0xE", "");
+        p.pkt_data.clear();
+        let dec = decode_capture(std::slice::from_ref(&p))[0].clone().unwrap();
+        assert!(find(&dec, "EXTENDED MESSAGE HEADER").is_some());
+    }
 }

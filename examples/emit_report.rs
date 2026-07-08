@@ -43,6 +43,23 @@ fn main() {
         });
     }
 
+    // If a sibling `.bin` (length-prefixed pktData records) exists, attach it so
+    // extended-message payloads decode fully.
+    let bin_path = Path::new(&tsv).with_extension("").with_extension("bin");
+    if let Ok(bin) = fs::read(&bin_path) {
+        let mut off = 0;
+        let mut idx = 0;
+        while off + 4 <= bin.len() && idx < packets.len() {
+            let len =
+                u32::from_le_bytes([bin[off], bin[off + 1], bin[off + 2], bin[off + 3]]) as usize;
+            off += 4;
+            packets[idx].pkt_data = bin[off..off + len].to_vec();
+            off += len;
+            idx += 1;
+        }
+        eprintln!("attached pktData from {}", bin_path.display());
+    }
+
     let label = Path::new(&tsv)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -51,6 +68,7 @@ fn main() {
     let ds = vec![Dataset {
         label,
         packets: &packets,
+        scope: &[], // fixtures carry no scope trace
     }];
     write_html(Path::new(&out), &ds).expect("write html");
     println!("wrote {out} ({} packets)", packets.len());

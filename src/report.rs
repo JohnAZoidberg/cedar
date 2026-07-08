@@ -8,17 +8,22 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::pd_decode::{decode_capture, Detail};
+use crate::pd_decode::{decode_capture, parse_data_words, vdm_summary, Detail};
 use crate::pd_session::{analyze, Event};
-use crate::protocol::Packet;
+use crate::protocol::{GraphSample, Packet};
 use crate::writer::utc_stamp;
 
 const TEMPLATE: &str = include_str!("report_template.html");
+
+/// Maximum scope points embedded per capture for charting; the full-resolution
+/// trace is still kept in the `.ccgx3` file.
+const SCOPE_CHART_POINTS: usize = 2000;
 
 /// A named capture to include in the report.
 pub struct Dataset<'a> {
     pub label: String,
     pub packets: &'a [Packet],
+    pub scope: &'a [GraphSample],
 }
 
 /// Write an HTML report covering one or more captures.
@@ -56,7 +61,53 @@ fn write_dataset(out: &mut String, ds: &Dataset) {
         }
         write_packet(out, p, dec.as_deref(), session.events[i].as_ref());
     }
-    out.push_str("]}");
+    out.push(']');
+    out.push_str(",\"scope\":");
+    write_scope(out, ds.scope);
+    out.push('}');
+}
+
+/// Emit a downsampled scope trace as parallel arrays `{t,v,i,p}` (seconds,
+/// volts, amps, watts). `null` when there is no scope data.
+fn write_scope(out: &mut String, scope: &[GraphSample]) {
+    if scope.len() < 2 {
+        out.push_str("null");
+        return;
+    }
+    let t0 = scope[0].time_stamp;
+    let bucket = scope.len().div_ceil(SCOPE_CHART_POINTS).max(1);
+
+    let mut ts = String::from("[");
+    let mut vs = String::from("[");
+    let mut is = String::from("[");
+    let mut ps = String::from("[");
+    let mut first = true;
+    for chunk in scope.chunks(bucket) {
+        // Keep the highest-power sample in each bucket so load spikes survive.
+        let s = chunk
+            .iter()
+            .max_by_key(|s| (s.volt as i64) * (s.amp as i64))
+            .unwrap();
+        let t = (s.time_stamp - t0) as f64 / 1e6;
+        let v = s.volt as f64 / 1000.0;
+        let i = s.amp as f64 / 1000.0;
+        if !first {
+            ts.push(',');
+            vs.push(',');
+            is.push(',');
+            ps.push(',');
+        }
+        first = false;
+        ts.push_str(&format!("{t:.4}"));
+        vs.push_str(&format!("{v:.3}"));
+        is.push_str(&format!("{i:.3}"));
+        ps.push_str(&format!("{:.2}", v * i));
+    }
+    ts.push(']');
+    vs.push(']');
+    is.push(']');
+    ps.push(']');
+    out.push_str(&format!("{{\"t\":{ts},\"v\":{vs},\"i\":{is},\"p\":{ps}}}"));
 }
 
 fn write_summary(out: &mut String, s: &crate::pd_session::Summary) {
@@ -64,6 +115,8 @@ fn write_summary(out: &mut String, s: &crate::pd_session::Summary) {
     let fields = [
         ("cable", s.cable.as_deref()),
         ("partner", s.partner.as_deref()),
+        ("manufacturer", s.manufacturer.as_deref()),
+        ("display", s.display.as_deref()),
         ("contract", s.contract.as_deref()),
     ];
     for (i, (k, v)) in fields.iter().enumerate() {
@@ -105,6 +158,12 @@ fn write_packet(out: &mut String, p: &Packet, dec: Option<&[Detail]>, event: Opt
         push_json_str(out, k);
         out.push(':');
         push_json_str(out, v);
+    }
+    if p.msg == "VENDOR_DEFINED" {
+        if let Some(summary) = parse_data_words(&p.data).as_deref().and_then(vdm_summary) {
+            out.push_str(",\"vdm\":");
+            push_json_str(out, &summary);
+        }
     }
     if let Some(e) = event {
         out.push_str(",\"event\":");

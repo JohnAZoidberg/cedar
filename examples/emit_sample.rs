@@ -1,11 +1,13 @@
-//! Generate a small synthetic capture and write it to `.ccgx3` + `.csv`.
-//! Used to validate the file writers without a physical device:
+//! Generate a small synthetic capture and write it to `.ccgx3` + `.csv` + `.html`.
+//! Used to validate the file writers (including the scope chart) without a
+//! physical device:
 //!
 //!     cargo run --example emit_sample -- /tmp/sample.ccgx3
 
 use std::path::PathBuf;
 
 use cedar::protocol::Decoder;
+use cedar::report::{write_html, Dataset};
 use cedar::writer;
 
 fn main() {
@@ -31,18 +33,31 @@ fn main() {
         &[0x2701_2c91, 0x0002_d12c, 0x0003_c12c, 0, 0, 0, 0],
     ));
 
-    // A couple of scope records.
-    dec.feed_scope(&scope_record(&[(100, 0x600, 0x800, 0x0, 0x820)]));
+    // A ramp of scope records so the V/I/P chart has something to draw.
+    for k in 0..40u32 {
+        let ts = 1000 + k * 1000;
+        let vbus = (0x200 + k * 0x30) as u16; // rising VBUS
+        let cur = (2048 + k * 45) as u16; // rising current (offset from 2048)
+        dec.feed_scope(&scope_record(&[(ts, vbus, 0x800, 0x0, cur)]));
+    }
 
     writer::write_ccgx3(&out, &dec.packets, &dec.scope).expect("write ccgx3");
     let csv = out.with_extension("csv");
     writer::write_csv(&csv, &dec.packets).expect("write csv");
+    let html = out.with_extension("html");
+    let ds = vec![Dataset {
+        label: "sample".to_string(),
+        packets: &dec.packets,
+        scope: &dec.scope,
+    }];
+    write_html(&html, &ds).expect("write html");
     println!(
-        "wrote {} ({} packets, {} scope) and {}",
+        "wrote {} ({} packets, {} scope), {} and {}",
         out.display(),
         dec.packets.len(),
         dec.scope.len(),
-        csv.display()
+        csv.display(),
+        html.display()
     );
 }
 
