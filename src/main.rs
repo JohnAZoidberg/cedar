@@ -53,6 +53,21 @@ enum Command {
         output: Option<PathBuf>,
     },
 
+    /// Print a plain-text decode of existing .ccgx3 capture(s).
+    Dump {
+        /// Capture files to dump.
+        #[arg(required = true)]
+        inputs: Vec<PathBuf>,
+
+        /// Only print packets annotated with a session event.
+        #[arg(long)]
+        events: bool,
+
+        /// Interleave VBUS/CC level transitions from the scope trace.
+        #[arg(long)]
+        scope: bool,
+    },
+
     /// List attached CY4500 analyzers.
     List,
 
@@ -88,6 +103,11 @@ fn run() -> Result<()> {
         Command::List => capture::list_devices(),
         Command::Version => print_version(),
         Command::Report { inputs, output } => report_captures(&inputs, output),
+        Command::Dump {
+            inputs,
+            events,
+            scope,
+        } => dump_captures(&inputs, events, scope),
         Command::Record {
             output,
             format,
@@ -123,6 +143,21 @@ fn report_captures(inputs: &[PathBuf], output: Option<PathBuf>) -> Result<()> {
     });
     report::write_html(&out, &datasets)?;
     println!("Wrote {} ({} capture(s))", out.display(), datasets.len());
+    Ok(())
+}
+
+fn dump_captures(inputs: &[PathBuf], events_only: bool, scope: bool) -> Result<()> {
+    let opts = cedar::dump::Options { events_only, scope };
+    for (i, input) in inputs.iter().enumerate() {
+        let (packets, samples) = cedar::reader::read_ccgx3(input)?;
+        if inputs.len() > 1 {
+            if i > 0 {
+                println!();
+            }
+            println!("== {} ==", input.display());
+        }
+        print!("{}", cedar::dump::dump(&packets, &samples, opts));
+    }
     Ok(())
 }
 

@@ -3,6 +3,7 @@
 //! without a physical device.
 
 pub mod capture;
+pub mod dump;
 pub mod java_serial;
 pub mod pd_decode;
 pub mod pd_session;

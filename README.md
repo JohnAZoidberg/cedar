@@ -58,6 +58,12 @@ tools); no extra setup is required.
 cedar report capture.ccgx3                    # writes capture.html
 cedar report a.ccgx3 b.ccgx3 -o compare.html
 
+# Plain-text decode to the terminal: summary, then one line per packet.
+# --events keeps only annotated packets; --scope interleaves debounced
+# VBUS/CC level transitions from the oscilloscope trace.
+cedar dump capture.ccgx3
+cedar dump --events --scope capture.ccgx3
+
 # List attached analyzers
 cedar list
 
