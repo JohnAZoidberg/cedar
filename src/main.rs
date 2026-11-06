@@ -14,7 +14,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use cedar::capture;
 use cedar::km003c;
-use cedar::protocol::Decoder;
+use cedar::protocol::{Decoder, Termination};
 use cedar::report;
 use cedar::tc66;
 use cedar::writer;
@@ -118,6 +118,40 @@ enum Command {
 
     /// Print the analyzer's firmware version.
     Version,
+
+    /// Set the CY4500's own termination on both CC lines (e.g. `rp` to make
+    /// the source turn VBUS off).
+    ///
+    /// The setting stays until it is changed, including after cedar exits
+    /// and across recordings. `none` restores plain pass-through.
+    Termination {
+        #[arg(value_enum)]
+        mode: TerminationMode,
+    },
+}
+
+#[derive(Copy, Clone, ValueEnum)]
+enum TerminationMode {
+    /// No termination of its own: plain pass-through (the default).
+    None,
+    /// Pull-up: the source sees a detach and turns VBUS off, so the sink
+    /// disconnects (and a battery device runs from its battery).
+    Rp,
+    /// Ra pull-down (the VCONN load). VBUS stays on.
+    Ra,
+    /// Rd pull-down (a sink's). VBUS stays on.
+    Rd,
+}
+
+impl From<TerminationMode> for Termination {
+    fn from(mode: TerminationMode) -> Self {
+        match mode {
+            TerminationMode::None => Termination::None,
+            TerminationMode::Rp => Termination::Rp,
+            TerminationMode::Ra => Termination::Ra,
+            TerminationMode::Rd => Termination::Rd,
+        }
+    }
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -163,6 +197,7 @@ fn run() -> Result<()> {
     match cli.command {
         Command::List => list_devices(),
         Command::Version => print_version(),
+        Command::Termination { mode } => set_termination(mode),
         Command::Report { inputs, output } => report_captures(&inputs, output),
         Command::Dump {
             inputs,
@@ -278,6 +313,18 @@ fn list_devices() -> Result<()> {
     for line in tc {
         println!("{line}");
     }
+    Ok(())
+}
+
+fn set_termination(mode: TerminationMode) -> Result<()> {
+    let dev = capture::find_device()?;
+    let analyzer = capture::Analyzer::open(&dev)?;
+    analyzer.set_termination(mode.into())?;
+    let name = mode
+        .to_possible_value()
+        .map(|v| v.get_name().to_string())
+        .unwrap_or_default();
+    println!("CC termination set to {name} on CC1 and CC2.");
     Ok(())
 }
 

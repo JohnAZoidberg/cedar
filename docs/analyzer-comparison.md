@@ -47,7 +47,7 @@ Markers used below:
 | **Linux setup** | `contrib/99-cy4500.rules` | `contrib/71-powerz-km003c.rules`. cedar detaches the `powerz` hwmon driver while recording and libusb reattaches it afterwards ✅ |
 | **`cedar version`** | Firmware version | USB `bcdDevice` only; the firmware version sits behind an encrypted memory read 📐 |
 | **High-speed pass-through** | Inline on CC | An Apple display came up at USB4 / Thunderbolt Gen4 through the meter ✅. A first attempt had no picture with an identical PD exchange, so the meter can't be ruled out as a factor on marginal links |
-| **Source/sink role** | Can set CC termination (`cmd_termination`, not exposed in cedar) | Can trigger PD/QC voltages from its own menu; not exposed over USB in cedar |
+| **Source/sink role** | Adds its own termination on CC: `cedar termination none\|rp\|ra\|rd` ✅. `rp` makes the source see a detach and turn VBUS off until `none`; `ra`/`rd` leave VBUS on. The setting persists after cedar exits | Can trigger PD/QC voltages from its own menu; not exposed over USB in cedar |
 
 ## When to use which
 

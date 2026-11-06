@@ -183,12 +183,31 @@ pub fn cmd_get_version() -> [u8; 4] {
     [CMD_GET_VERSION, 0, 0, 0]
 }
 
-#[allow(dead_code)]
-pub fn cmd_termination(cc1: u8, cc2: u8) -> [u8; 12] {
+/// A termination the analyzer can put on a CC line, in parallel with
+/// whatever the two ports present. The values were worked out on hardware
+/// (a laptop host advertising 1.5 A, a USB 2 device); the firmware sends no
+/// response to the command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Termination {
+    /// No termination of its own: plain pass-through. The power-on default.
+    None = 0,
+    /// Pull-up (Rp). With a source on the line, CC rises above the
+    /// attach window, so the source sees a detach and turns VBUS off.
+    Rp = 1,
+    /// Low-value pull-down (Ra, the VCONN load).
+    Ra = 2,
+    /// Sink pull-down (Rd).
+    Rd = 3,
+}
+
+/// Build the `TERMINATION` command. The setting sticks until it is changed,
+/// across captures and after the host releases the analyzer.
+pub fn cmd_termination(cc1: Termination, cc2: Termination) -> [u8; 12] {
     let mut cmd = [0u8; 12];
     cmd[0] = CMD_TERMINATION;
-    cmd[4] = cc1;
-    cmd[8] = cc2;
+    cmd[4] = cc1 as u8;
+    cmd[8] = cc2 as u8;
     cmd
 }
 
@@ -647,6 +666,18 @@ fn is_request_chunk(ext_hdr: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn termination_command_layout() {
+        assert_eq!(
+            cmd_termination(Termination::Rp, Termination::Rd),
+            [7, 0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0]
+        );
+        assert_eq!(
+            cmd_termination(Termination::None, Termination::None),
+            [7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+    }
 
     #[test]
     fn group_matches_java_numberformat() {

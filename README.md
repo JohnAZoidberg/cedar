@@ -76,6 +76,13 @@ cedar list
 # Print the analyzer's firmware version
 cedar version
 
+# CY4500 only: put the analyzer's own termination on both CC lines.
+# `rp` makes the source see a detach and turn VBUS off (e.g. to run a
+# battery device from its battery); `none` restores plain pass-through.
+# The setting stays until changed, also after cedar exits.
+cedar termination rp      # none | rp | ra | rd
+cedar termination none
+
 # Record until Ctrl+C, then save. The extension picks the format.
 cedar record capture.ccgx3
 cedar record capture.csv
