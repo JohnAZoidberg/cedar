@@ -28,6 +28,14 @@ pub struct Dataset<'a> {
 
 /// Write an HTML report covering one or more captures.
 pub fn write_html(path: &Path, datasets: &[Dataset]) -> Result<()> {
+    let html = render_html(datasets, &utc_stamp());
+    fs::write(path, html).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+/// Render the HTML report for one or more captures. `stamp` is the generation
+/// time shown in the page header.
+pub fn render_html(datasets: &[Dataset], stamp: &str) -> String {
     let mut json = String::from("[");
     for (i, ds) in datasets.iter().enumerate() {
         if i > 0 {
@@ -39,11 +47,9 @@ pub fn write_html(path: &Path, datasets: &[Dataset]) -> Result<()> {
     // Keep the embedded JSON from prematurely closing the <script> element.
     let json = json.replace("</", "<\\/");
 
-    let html = TEMPLATE
+    TEMPLATE
         .replace("__DATA__", &json)
-        .replace("__STAMP__", &utc_stamp());
-    fs::write(path, html).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
+        .replace("__STAMP__", stamp)
 }
 
 fn write_dataset(out: &mut String, ds: &Dataset) {

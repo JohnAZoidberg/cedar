@@ -1,7 +1,7 @@
 //! Writing captures to `.ccgx3` and `.csv`, matching the original utility.
 
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Cursor, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,9 +16,15 @@ use crate::protocol::{GraphSample, Packet};
 /// (`ezpd_last.part`) and scope list (`ezpd_scope.scope`) inside a
 /// timestamp-named folder, exactly as the original "Save" action produces.
 pub fn write_ccgx3(path: &Path, packets: &[Packet], scope: &[GraphSample]) -> Result<()> {
-    let folder = timestamp_folder();
-    let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
-    let mut zip = ZipWriter::new(BufWriter::new(file));
+    let bytes = ccgx3_bytes(packets, scope, unix_now())?;
+    std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Build a `.ccgx3` file in memory (see [`write_ccgx3`]). `unix_secs` names the
+/// folder inside the archive.
+pub fn ccgx3_bytes(packets: &[Packet], scope: &[GraphSample], unix_secs: u64) -> Result<Vec<u8>> {
+    let folder = timestamp_folder(unix_secs);
+    let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
     zip.add_directory(format!("{folder}/"), options)?;
@@ -29,8 +35,7 @@ pub fn write_ccgx3(path: &Path, packets: &[Packet], scope: &[GraphSample]) -> Re
     zip.start_file(format!("{folder}/ezpd_scope.scope"), options)?;
     zip.write_all(&serialize_scope(scope))?;
 
-    zip.finish()?;
-    Ok(())
+    Ok(zip.finish()?.into_inner())
 }
 
 /// Write a `.csv` file with the same columns and formatting as the original
@@ -38,6 +43,13 @@ pub fn write_ccgx3(path: &Path, packets: &[Packet], scope: &[GraphSample]) -> Re
 pub fn write_csv(path: &Path, packets: &[Packet]) -> Result<()> {
     let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
     let mut w = BufWriter::new(file);
+    write_csv_to(&mut w, packets)?;
+    w.flush()?;
+    Ok(())
+}
+
+/// Write the `.csv` export (see [`write_csv`]) to any writer.
+pub fn write_csv_to(w: &mut impl Write, packets: &[Packet]) -> std::io::Result<()> {
     writeln!(
         w,
         "Sno,Ok,SOP,Message,Msg Id,Data Role,Power Role,Obj Count,Rev,Duration,Delta,Vbus(V),Data,Start Time,End Time"
@@ -71,7 +83,6 @@ pub fn write_csv(path: &Path, packets: &[Packet]) -> Result<()> {
             p.s_time,
         )?;
     }
-    w.flush()?;
     Ok(())
 }
 
@@ -97,24 +108,30 @@ fn csv_data_column(p: &Packet) -> String {
     out
 }
 
-/// Build a `YYYY_MM_DD_HH_MM_SS` folder name from the current UTC time, the
-/// same shape the reference utility uses for its per-capture log directory.
-fn timestamp_folder() -> String {
-    let secs = SystemTime::now()
+/// Seconds since the Unix epoch. Native only: on `wasm32-unknown-unknown`
+/// `SystemTime::now()` panics, so the web front end passes the time in.
+fn unix_now() -> u64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let (year, month, day, hour, min, sec) = civil_from_unix(secs);
+        .unwrap_or(0)
+}
+
+/// Build a `YYYY_MM_DD_HH_MM_SS` folder name from a UTC time, the same shape
+/// the reference utility uses for its per-capture log directory.
+fn timestamp_folder(unix_secs: u64) -> String {
+    let (year, month, day, hour, min, sec) = civil_from_unix(unix_secs);
     format!("{year:04}_{month:02}_{day:02}_{hour:02}_{min:02}_{sec:02}")
 }
 
 /// Current UTC time formatted as `YYYY-MM-DD HH:MM`, for report timestamps.
 pub(crate) fn utc_stamp() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let (year, month, day, hour, min, _sec) = civil_from_unix(secs);
+    utc_stamp_at(unix_now())
+}
+
+/// A UTC time formatted as `YYYY-MM-DD HH:MM`, for report timestamps.
+pub fn utc_stamp_at(unix_secs: u64) -> String {
+    let (year, month, day, hour, min, _sec) = civil_from_unix(unix_secs);
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{min:02}")
 }
 

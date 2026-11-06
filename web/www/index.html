@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cedar</title>
+<meta name="description" content="Record USB Power Delivery traffic from a CY4500 EZ-PD Analyzer or POWER-Z KM003C in the browser, and open .ccgx3 captures.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M2 11h3l2-6 2 8 2-4h3' fill='none' stroke='%232a78d6' stroke-width='1.6' stroke-linejoin='round' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <h1>cedar</h1>
+    <p>USB Power Delivery capture for the CY4500 EZ-PD Analyzer and POWER-Z KM003C</p>
+  </div>
+  <label class="open-btn button">
+    <input id="file-input" type="file" accept=".ccgx3" multiple>
+    Open captures…
+  </label>
+</header>
+
+<main>
+  <p id="no-webusb" class="notice" hidden>
+    This browser can't talk to USB devices. Recording needs Chrome, Edge or
+    another Chromium-based browser on a secure (HTTPS or localhost) page. You
+    can still open <code>.ccgx3</code> captures here.
+  </p>
+  <p id="notice" class="notice error" role="alert" hidden></p>
+
+  <section class="bench" aria-label="Analyzer">
+    <div class="analyzer">
+      <div class="device">
+        <span id="rec-dot" class="dot" aria-hidden="true"></span>
+        <div>
+          <div id="device-name" class="device-name">No analyzer selected</div>
+          <div id="device-detail" class="device-detail">Plug in a CY4500 or KM003C, then choose it.</div>
+        </div>
+      </div>
+      <div class="actions">
+        <label class="check" title="VBUS, current and CC levels over time">
+          <input id="opt-scope" type="checkbox" checked> Record levels
+        </label>
+        <button id="btn-choose" type="button" class="button">Choose analyzer</button>
+        <button id="btn-record" type="button" class="button primary" disabled>Record</button>
+        <button id="btn-stop" type="button" class="button stop" hidden>Stop</button>
+      </div>
+    </div>
+
+    <div class="readout blank" aria-live="off">
+      <div class="figure">
+        <div class="value"><span id="r-vbus">0.00</span><span class="unit">V</span></div>
+        <div class="label">VBUS</div>
+      </div>
+      <div class="figure">
+        <div class="value"><span id="r-ibus">0.00</span><span class="unit">A</span></div>
+        <div class="label">Current</div>
+      </div>
+      <div class="figure">
+        <div class="value"><span id="r-power">0.0</span><span class="unit">W</span></div>
+        <div class="label">Power</div>
+      </div>
+      <dl class="side">
+        <div><dt>CC1</dt><dd id="r-cc1">–</dd></div>
+        <div><dt>CC2</dt><dd id="r-cc2">–</dd></div>
+        <div><dt>Elapsed</dt><dd id="r-elapsed">–</dd></div>
+        <div><dt>Packets</dt><dd id="r-packets">–</dd></div>
+      </dl>
+    </div>
+
+    <dl class="session">
+      <div><dt>Contract</dt><dd id="s-contract">none yet</dd></div>
+      <div><dt>Cable</dt><dd id="s-cable">not discovered</dd></div>
+      <div><dt>Partner</dt><dd id="s-partner">not discovered</dd></div>
+      <div id="s-display-row" hidden><dt>Display</dt><dd id="s-display"></dd></div>
+    </dl>
+
+    <div class="log-wrap" id="log-wrap" tabindex="0" aria-label="Live PD messages">
+      <table class="log">
+        <thead><tr><th class="num">Time (s)</th><th>SOP</th><th>Message</th><th class="num">VBUS (V)</th><th>Data</th><th>Event</th></tr></thead>
+        <tbody id="log-body"></tbody>
+      </table>
+      <p id="log-empty" class="log-empty">PD messages appear here while recording.</p>
+    </div>
+  </section>
+
+  <section id="results" class="results" aria-label="Capture" hidden>
+    <div class="results-head">
+      <h2 id="results-title">Capture</h2>
+      <div class="save">
+        <label class="name">File name
+          <input id="out-name" type="text" spellcheck="false" autocomplete="off">
+        </label>
+        <button id="dl-ccgx3" type="button" class="button">Save .ccgx3</button>
+        <button id="dl-csv" type="button" class="button">Save .csv</button>
+        <button id="dl-html" type="button" class="button">Save report</button>
+        <button id="dl-raw" type="button" class="button" hidden title="KM003C poll responses, one hex line each (cedar record --raw)">Save raw log</button>
+      </div>
+    </div>
+    <div class="tabs" role="tablist">
+      <button id="tab-report" role="tab" aria-selected="true" aria-controls="pane-report" type="button">Report</button>
+      <button id="tab-text" role="tab" aria-selected="false" aria-controls="pane-text" type="button">Text decode</button>
+    </div>
+    <div id="pane-report" role="tabpanel" aria-labelledby="tab-report">
+      <iframe id="report-frame" title="Capture report" sandbox="allow-scripts allow-downloads"></iframe>
+    </div>
+    <div id="pane-text" role="tabpanel" aria-labelledby="tab-text" hidden>
+      <div class="text-opts">
+        <label class="check"><input id="opt-events" type="checkbox"> Only events</label>
+        <label class="check"><input id="opt-levels" type="checkbox"> Level transitions</label>
+      </div>
+      <pre id="dump" class="dump"></pre>
+    </div>
+  </section>
+</main>
+
+<div id="drop" class="drop" hidden><p>Drop .ccgx3 files to open them</p></div>
+</body>
+</html>

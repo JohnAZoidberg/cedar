@@ -35,6 +35,9 @@ Output is **format-compatible with the original tool**:
   PD message decoder is pinned to the reference `parse_ccgx3.py`/`pd_decode.py`
   by golden tests.
 
+There is also a [web version](#web-ui) that records from either analyzer in
+Chrome or Edge over WebUSB, with no install.
+
 ## Building
 
 Requires a stable Rust toolchain.
@@ -164,6 +167,33 @@ interface: enabling the PD monitor over HID wedged the meter's HID endpoint,
 and polling PD data over HID rebooted it. The protocol follows the
 reverse-engineering work in
 [okhsunrog/km003c-rs](https://github.com/okhsunrog/km003c-rs).
+
+## Web UI
+
+`web/` is a browser front end built from the same Rust code, compiled to
+WebAssembly. It records from a CY4500 or KM003C over WebUSB, shows VBUS,
+current, power, the contract and the PD messages live, and afterwards shows
+the HTML report and text decode and saves `.ccgx3`, `.csv`, the report, and
+(for the KM003C) the raw poll log. It also opens existing `.ccgx3` files; open
+several to compare them in one report. Files never leave the browser.
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.130 --locked  # must match Cargo.lock
+web/build.sh
+python3 -m http.server -d web/www 8000                     # then open http://localhost:8000
+```
+
+`web/www` is a static site. WebUSB only works on HTTPS pages (or
+`localhost`) and only in Chromium-based browsers (Chrome, Edge, Opera);
+opening captures works in any browser.
+
+Both analyzers declare Microsoft OS descriptors that bind WinUSB
+automatically, so on Windows they work without installing a driver. On Linux
+the [udev rules](#linux-permissions) are needed as for the CLI, and the
+kernel's `powerz` driver holds the KM003C's interface; unlike the CLI, the
+browser can't detach it, so release it first with `sudo modprobe -r powerz`
+(or blacklist the module).
 
 ## How it works
 

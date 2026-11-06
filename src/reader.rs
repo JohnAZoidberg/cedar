@@ -2,8 +2,7 @@
 //! unzip and deserialize the packet and scope lists so a capture can be
 //! re-decoded (e.g. into an HTML report).
 
-use std::fs::File;
-use std::io::Read;
+use std::io::{Cursor, Read};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -15,8 +14,13 @@ use crate::protocol::{GraphSample, Packet};
 /// Read a `.ccgx3` file into its packet and scope lists. Scope may be empty if
 /// the capture was taken with the trace disabled.
 pub fn read_ccgx3(path: &Path) -> Result<(Vec<Packet>, Vec<GraphSample>)> {
-    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let mut zip = ZipArchive::new(file).with_context(|| format!("reading {}", path.display()))?;
+    let bytes = std::fs::read(path).with_context(|| format!("opening {}", path.display()))?;
+    read_ccgx3_bytes(&bytes).with_context(|| format!("reading {}", path.display()))
+}
+
+/// Read an in-memory `.ccgx3` file (see [`read_ccgx3`]).
+pub fn read_ccgx3_bytes(bytes: &[u8]) -> Result<(Vec<Packet>, Vec<GraphSample>)> {
+    let mut zip = ZipArchive::new(Cursor::new(bytes)).context("not a .ccgx3 (ZIP) file")?;
 
     let mut part: Option<Vec<u8>> = None;
     let mut scope: Option<Vec<u8>> = None;
@@ -34,8 +38,8 @@ pub fn read_ccgx3(path: &Path) -> Result<(Vec<Packet>, Vec<GraphSample>)> {
         }
     }
 
-    let part = part.with_context(|| format!("{}: no ezpd_last.part in archive", path.display()))?;
-    let packets = read_packets(&part).with_context(|| format!("decoding {}", path.display()))?;
+    let part = part.context("no ezpd_last.part in archive")?;
+    let packets = read_packets(&part).context("decoding packet list")?;
     let scope = match scope {
         Some(bytes) => read_scope(&bytes).unwrap_or_default(),
         None => Vec::new(),
