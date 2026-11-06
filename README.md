@@ -177,19 +177,27 @@ the HTML report and text decode and saves `.ccgx3`, `.csv`, the report, and
 (for the KM003C) the raw poll log. It also opens existing `.ccgx3` files; open
 several to compare them in one report. Files never leave the browser.
 
+It builds with [Trunk](https://trunkrs.dev), as configured in `Trunk.toml`:
+
 ```sh
 rustup target add wasm32-unknown-unknown
-# The CLI must match the wasm-bindgen crate in Cargo.lock; build.sh prints it.
-cargo install wasm-bindgen-cli --version "$(web/build.sh --wasm-bindgen-version)" --locked
-web/build.sh
-python3 -m http.server -d web/www 8000   # then open http://localhost:8000
+cargo install trunk --locked   # or download a release binary
+trunk serve                    # http://localhost:8080, rebuilds on changes
 ```
 
-`web/www` is a static site. WebUSB only works on HTTPS pages (or
-`localhost`) and only in Chromium-based browsers (Chrome, Edge, Opera);
-opening captures works in any browser. `.github/workflows/web.yml` builds it
-on every push and deploys `main` to GitHub Pages (set the repository's Pages
-source to "GitHub Actions").
+`trunk build --release` writes the same static site to `dist/`. Trunk fetches
+the `wasm-bindgen` CLI matching `Cargo.lock` by itself (or uses one on `PATH`
+if the version matches). WebUSB only works on HTTPS pages (or `localhost`) and
+only in Chromium-based browsers (Chrome, Edge, Opera); opening captures works
+in any browser. `.github/workflows/web.yml` builds the site on every push and
+deploys `main` to GitHub Pages (set the repository's Pages source to "GitHub
+Actions").
+
+If `trunk serve` fails with "failed to build file system watcher: Too many
+open files", the desktop session has used up the inotify instance limit (128
+on many distributions). Raise it with
+`sudo sysctl fs.inotify.max_user_instances=512`, or run `trunk build` and serve
+`dist/` with any static file server.
 
 Both analyzers declare Microsoft OS descriptors that bind WinUSB
 automatically, so on Windows they work without installing a driver. On Linux

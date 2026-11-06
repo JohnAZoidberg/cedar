@@ -1,10 +1,16 @@
 // cedar web UI: WebUSB transports for the CY4500 and KM003C, a live view while
 // recording, and the report / text decode / file downloads afterwards. All
-// decoding and file formats come from the Rust core (pkg/cedar_web.js).
+// decoding and file formats come from the Rust core (web/src/lib.rs).
 
-import init, * as wasm from "./pkg/cedar_web.js";
-
-await init();
+// Trunk's loader instantiates the wasm module and exposes its bindings; it may
+// finish before or after this module runs.
+const wasm =
+  window.wasmBindings ??
+  (await new Promise((resolve) =>
+    window.addEventListener("TrunkApplicationStarted", () => resolve(window.wasmBindings), {
+      once: true,
+    }),
+  ));
 const INFO = JSON.parse(wasm.deviceInfo());
 const CY = INFO.cy4500;
 const KM = INFO.km003c;

@@ -1,0 +1,15 @@
+# Trunk builds the web UI (web/www, with the web/ crate compiled to wasm):
+#
+#   trunk serve             # develop against http://localhost:8080
+#   trunk build --release   # the static site, into dist/
+#
+# localhost counts as a secure context, so WebUSB works under `trunk serve`;
+# anywhere else the page must be served over HTTPS. The crate that gets built
+# is declared in web/www/index.html's <link data-trunk rel="rust"> tag.
+
+[build]
+target = "web/www/index.html"
+dist = "dist"
+
+[watch]
+watch = ["web/www", "web/src", "web/Cargo.toml", "src", "Cargo.toml"]

@@ -26,25 +26,26 @@ jobs:
         run: |
           cargo clippy -p cedar --no-default-features --lib --target wasm32-unknown-unknown -- -D warnings
           cargo clippy -p cedar-web --target wasm32-unknown-unknown -- -D warnings
-      - name: Find wasm-bindgen version
-        id: wb
-        run: echo "version=$(web/build.sh --wasm-bindgen-version)" >> "$GITHUB_OUTPUT"
-      - name: Install wasm-bindgen CLI
-        uses: taiki-e/install-action@v2
-        with:
-          tool: wasm-bindgen@${{ steps.wb.outputs.version }}
-      - name: Build
-        run: web/build.sh
-      - name: Check the page's files exist
+      # Trunk fetches the wasm-bindgen CLI matching Cargo.lock by itself.
+      - name: Install trunk
         run: |
-          for f in index.html app.js style.css pkg/cedar_web.js pkg/cedar_web_bg.wasm; do
-            test -s "web/www/$f" || { echo "missing web/www/$f"; exit 1; }
+          curl -sSL https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xzf - -C "$HOME/.cargo/bin" trunk
+      # --public-url must match where Pages serves the site: project pages live
+      # under /<repo>/, not at the domain root.
+      - name: Build the site
+        run: trunk build --release --public-url "/${{ github.event.repository.name }}/"
+      - name: Check the site's files exist
+        run: |
+          test -s dist/index.html
+          for f in 'app-*.js' 'style-*.css' 'cedar-web-*.js' 'cedar-web-*_bg.wasm'; do
+            ls dist/$f > /dev/null || { echo "missing dist/$f"; exit 1; }
           done
       - name: Upload Pages artifact
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
-          path: web/www
+          path: dist
 
   deploy:
     name: Deploy to GitHub Pages
