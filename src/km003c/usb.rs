@@ -154,6 +154,17 @@ impl Km003c {
         self.transact(Command::PollPd)
     }
 
+    /// Open a session without enabling the PD monitor, for
+    /// [`Self::poll_adc`].
+    pub fn connect(&self) -> Result<()> {
+        self.transact(Command::Connect).map(drop)
+    }
+
+    /// Read the measurement block (µV / µA readings).
+    pub fn poll_adc(&self) -> Result<AdcSample> {
+        adc_sample(&self.transact(Command::PollAdc)?)
+    }
+
     /// Run the capture loop until `stop` is set, decoding into `decoder`.
     ///
     /// If `raw` is given, every poll response that carries PD events is also

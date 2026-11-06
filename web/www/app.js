@@ -2,6 +2,8 @@
 // recording, and the report / text decode / file downloads afterwards. All
 // decoding and file formats come from the Rust core (web/src/lib.rs).
 
+import { setupMeter } from "./meter.js";
+
 // Trunk's loader instantiates the wasm module and exposes its bindings; it may
 // finish before or after this module runs.
 const wasm =
@@ -271,6 +273,7 @@ class Km003c {
       await this.close();
       throw new Error(`Couldn't start the KM003C's PD monitor: ${errorText(e)}`);
     }
+    this.monitor = true;
     this.running = true;
     this.loops = [
       (async () => {
@@ -286,14 +289,43 @@ class Km003c {
     ];
   }
 
+  /**
+   * Poll the measurement block (µA readings) without the PD monitor, calling
+   * `onReading(response, performance.now())` for each, as `cedar meter`.
+   */
+  async startMeter(onReading, { onError }) {
+    await this.open();
+    try {
+      await this.transact("connect");
+    } catch (e) {
+      await this.close();
+      throw new Error(`Couldn't start the KM003C: ${errorText(e)}`);
+    }
+    this.monitor = false;
+    this.running = true;
+    this.loops = [
+      (async () => {
+        try {
+          while (this.running) {
+            onReading(await this.transact("adc"), performance.now());
+            await sleep(KM.pollMs);
+          }
+        } catch (e) {
+          if (this.running) onError(e);
+        }
+      })(),
+    ];
+  }
+
   async stop() {
     this.running = false;
     await Promise.allSettled(this.loops);
     this.loops = [];
-    if (this.reading) {
+    if (this.reading && this.monitor) {
       // Always try to turn the monitor off again, even after an error.
       await this.transact("monitorOff").catch(() => {});
     }
+    this.monitor = false;
     await this.close();
   }
 
@@ -362,17 +394,26 @@ function setDevice(name, detail) {
 function render() {
   const recording = state === "recording" || state === "stopping";
   const busy = state === "starting" || state === "stopping";
+  // The current meter uses the same KM003C; one or the other runs.
+  const measuring = meterView?.busy ?? false;
   $("btn-record").hidden = recording;
   $("btn-stop").hidden = !recording;
-  $("btn-record").disabled = !analyzer || busy;
+  $("btn-record").disabled = !analyzer || busy || measuring;
   $("btn-stop").disabled = state === "stopping";
-  $("btn-choose").disabled = recording || busy;
+  $("btn-choose").disabled = recording || busy || measuring;
   $("opt-scope").disabled = recording || busy;
   $("file-input").disabled = recording || busy;
   $("rec-dot").className = "dot" + (recording ? " live" : analyzer ? " ready" : "");
   $("device-detail").textContent =
-    state === "starting" ? "Starting…" : recording ? "Recording." : deviceDetail;
+    state === "starting"
+      ? "Starting…"
+      : recording
+        ? "Recording."
+        : measuring
+          ? "Measuring current in the Current meter view. Stop it to record."
+          : deviceDetail;
   document.querySelector(".readout").classList.toggle("idle", !recording);
+  meterView?.render();
 }
 
 function localStamp(d = new Date()) {
@@ -419,10 +460,10 @@ async function adopt(dev) {
   render();
 }
 
-async function chooseAnalyzer() {
+async function chooseAnalyzer(filters = FILTERS) {
   let dev;
   try {
-    dev = await navigator.usb.requestDevice({ filters: FILTERS });
+    dev = await navigator.usb.requestDevice({ filters });
   } catch (e) {
     if (e?.name !== "NotFoundError") showError(errorText(e)); // NotFoundError: picker cancelled
     return;
@@ -461,7 +502,7 @@ function resetLive() {
 }
 
 async function startRecording() {
-  if (!analyzer || state !== "ready") return;
+  if (!analyzer || state !== "ready" || meterView.busy) return;
   if (results?.recorded && !results.saved && !confirm("Discard the capture you haven't saved?")) return;
   freeResults();
   showError("");
@@ -677,6 +718,7 @@ async function openFiles(files) {
     return;
   }
   if (results?.recorded && !results.saved && !confirm("Discard the capture you haven't saved?")) return;
+  if (location.hash === "#meter") location.hash = "#capture";
   const items = [];
   const errors = [];
   for (const f of files) {
@@ -690,6 +732,38 @@ async function openFiles(files) {
   showError(errors.length ? `Couldn't open ${errors.join("\n")}` : "");
   if (items.length) showResults(items, { recorded: false });
 }
+
+// ---------------------------------------------------------------------------
+// Views: PD capture and current meter, selected by the URL hash
+
+const meterView = setupMeter({
+  wasm,
+  meter: () => (analyzer?.kind === "km003c" ? analyzer : null),
+  other: () => (analyzer && analyzer.kind !== "km003c" ? analyzer.name : null),
+  choose: () => chooseAnalyzer([{ vendorId: KM.vid, productId: KM.pid }]),
+  captureBusy: () => state === "starting" || state === "recording" || state === "stopping",
+  changed: render,
+  showError,
+  download,
+  stamp: localStamp,
+  errorText,
+});
+
+function showView(name) {
+  const meter = name === "meter";
+  $("view-capture").hidden = meter;
+  $("view-meter").hidden = !meter;
+  $("open-btn").hidden = meter;
+  for (const [id, on] of [["nav-capture", !meter], ["nav-meter", meter]]) {
+    if (on) $(id).setAttribute("aria-current", "page");
+    else $(id).removeAttribute("aria-current");
+  }
+  if (meter) meterView.shown();
+}
+
+const hashView = () => (location.hash === "#meter" ? "meter" : "capture");
+window.addEventListener("hashchange", () => showView(hashView()));
+showView(hashView());
 
 // ---------------------------------------------------------------------------
 // Wiring
@@ -750,7 +824,7 @@ window.addEventListener("drop", (e) => {
 });
 
 window.addEventListener("beforeunload", (e) => {
-  if (state === "recording" || (results?.recorded && !results.saved)) e.preventDefault();
+  if (state === "recording" || meterView.busy || (results?.recorded && !results.saved)) e.preventDefault();
 });
 
 if (!("usb" in navigator)) {
@@ -766,17 +840,18 @@ if (!("usb" in navigator)) {
     if (state === "recording") {
       await stopRecording("The analyzer was unplugged. The capture up to that point is below.");
     }
+    await meterView.stop("The meter was unplugged. Its figures up to that point are kept.");
     analyzer = null;
     state = "idle";
     setDevice("No analyzer selected", "Plug in a CY4500 or KM003C, then choose it.");
     render();
   });
   // Reconnect to an analyzer this site was already allowed to use, preferring
-  // the CY4500 like the CLI does.
+  // the CY4500 like the CLI does (the KM003C on the meter view).
   const known = await navigator.usb.getDevices();
-  const pick =
-    known.find((d) => d.vendorId === CY.vid && d.productId === CY.pid) ??
-    known.find((d) => d.vendorId === KM.vid && d.productId === KM.pid);
+  const cy = known.find((d) => d.vendorId === CY.vid && d.productId === CY.pid);
+  const km = known.find((d) => d.vendorId === KM.vid && d.productId === KM.pid);
+  const pick = hashView() === "meter" ? (km ?? cy) : (cy ?? km);
   if (pick) await adopt(pick);
   render();
 }

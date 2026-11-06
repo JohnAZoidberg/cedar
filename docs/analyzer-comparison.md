@@ -33,6 +33,7 @@ Markers used below:
 | | CY4500 | KM003C |
 |---|---|---|
 | **VBUS / current / CC trace** | Continuous high-rate stream on its own endpoint | One sample per poll, about 100 Hz in cedar ✅. The meter can stream up to 1000 SPS ("AdcQueue"), but that needs an authentication handshake cedar doesn't do yet 📐 |
+| **Current resolution** | About 2.8 mA per ADC count (`(raw − 2048) × 100 / 36` mA) 📐, not usable for low currents | Measurement block: 1 µA, fresh on every ~100 Hz poll, plus the meter's own 1 s average ✅. `cedar meter` uses this. With nothing attached it reads a few hundred µA either side of zero, so measure a zero offset. The PD status block that `cedar record` uses reports whole mA |
 | **Current direction** | Magnitude only | Signed ✅ (power flowing male → female reads negative). cedar currently stores the magnitude, to match the CY4500 / `.ccgx3` model |
 | **VBUS range** | cedar's scaling (`raw × 3296 × 11 / 4096` mV on a 12-bit ADC) tops out near 36 V, below 48 V EPR 📐 | Rated to about 50 V by ChargerLab; tested only to 20.6 V so far |
 | **VBUS per packet** | Sampled with the packet (≈9 mV steps) | The previous poll's reading (≤10 ms old), stored in CY4500 counts (≈9 mV steps) |

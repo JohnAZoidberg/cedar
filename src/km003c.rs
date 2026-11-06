@@ -10,6 +10,9 @@
 //! writers, HTML report, `dump`, session analysis) works unchanged and the
 //! resulting `.ccgx3` files open in the original EZ-PD utility.
 //!
+//! The measurement block ([`Command::PollAdc`], µV / µA resolution) feeds
+//! `cedar meter` and the web UI's current meter (see `meter.rs`).
+//!
 //! Only the vendor bulk interface (0) is used. The HID interface answers ADC
 //! requests, but enabling the PD monitor or polling PD data over it wedged or
 //! rebooted the meter in testing.
@@ -39,8 +42,13 @@ const CMD_PD_MONITOR_ON: u8 = 0x10;
 const CMD_PD_MONITOR_OFF: u8 = 0x11;
 const PUT_DATA: u8 = 0x41;
 
+/// GetData attribute selecting the measurement block (µV/µA readings).
+const ATT_ADC: u16 = 0x01;
 /// GetData attribute selecting the PD status block plus queued PD events.
 const ATT_PD_PACKET: u16 = 0x10;
+
+/// Size of the measurement block returned for [`Command::PollAdc`].
+pub const ADC_SIZE: usize = 44;
 
 /// Size of the measurement block that starts every PD payload.
 pub const PD_STATUS_SIZE: usize = 12;
@@ -62,6 +70,8 @@ pub enum Command {
     PdMonitorOff,
     /// GetData for the PD status block plus queued PD events.
     PollPd,
+    /// GetData for the measurement block ([`AdcSample`]).
+    PollAdc,
 }
 
 impl Command {
@@ -72,6 +82,7 @@ impl Command {
             Command::PdMonitorOn => ctrl_header(CMD_PD_MONITOR_ON, id, 1),
             Command::PdMonitorOff => ctrl_header(CMD_PD_MONITOR_OFF, id, 0),
             Command::PollPd => ctrl_header(CMD_GET_DATA, id, ATT_PD_PACKET),
+            Command::PollAdc => ctrl_header(CMD_GET_DATA, id, ATT_ADC),
         }
     }
 
@@ -82,6 +93,7 @@ impl Command {
             Command::PdMonitorOn => "PD monitor enable",
             Command::PdMonitorOff => "PD monitor disable",
             Command::PollPd => "PD poll",
+            Command::PollAdc => "measurement poll",
         }
     }
 
@@ -93,13 +105,18 @@ impl Command {
                 put_data_payload(resp, ATT_PD_PACKET)?,
                 Framed::Complete(_)
             )),
+            Command::PollAdc => Ok(matches!(
+                put_data_payload(resp, ATT_ADC)?,
+                Framed::Complete(_)
+            )),
             _ => Ok(resp.len() >= 4),
         }
     }
 
     /// Check a complete response: control commands must be accepted.
     pub fn check_response(self, resp: &[u8]) -> Result<()> {
-        if self != Command::PollPd && resp[0] & 0x7f != CMD_ACCEPT {
+        let poll = matches!(self, Command::PollPd | Command::PollAdc);
+        if !poll && resp[0] & 0x7f != CMD_ACCEPT {
             bail!(
                 "KM003C rejected {} (response type {:#04x})",
                 self.what(),
@@ -117,6 +134,40 @@ pub fn pd_payload(resp: &[u8]) -> Result<&[u8]> {
         Framed::Complete(None) => bail!("KM003C response carried no PD data"),
         Framed::Incomplete => bail!("KM003C response is incomplete"),
     }
+}
+
+/// One reading from the meter's measurement block. Field layout follows
+/// `AdcDataRaw` in km003c-rs; only the fields cedar uses are kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdcSample {
+    pub vbus_uv: i32,
+    /// Signed: negative when power flows from the male to the female port.
+    /// Fresh on every poll at cedar's ~100 Hz.
+    pub ibus_ua: i32,
+    /// The meter's own averages. They change once a second and match the
+    /// mean of the previous second's readings, so they are 1 s block
+    /// averages.
+    pub vbus_avg_uv: i32,
+    pub ibus_avg_ua: i32,
+}
+
+/// Parse the measurement block of a complete [`Command::PollAdc`] response.
+pub fn adc_sample(resp: &[u8]) -> Result<AdcSample> {
+    let p = match put_data_payload(resp, ATT_ADC)? {
+        Framed::Complete(Some(payload)) => payload,
+        Framed::Complete(None) => bail!("KM003C response carried no measurement data"),
+        Framed::Incomplete => bail!("KM003C response is incomplete"),
+    };
+    if p.len() < ADC_SIZE {
+        bail!("KM003C measurement block too short: {} bytes", p.len());
+    }
+    let i32_at = |i: usize| i32::from_le_bytes([p[i], p[i + 1], p[i + 2], p[i + 3]]);
+    Ok(AdcSample {
+        vbus_uv: i32_at(0),
+        ibus_ua: i32_at(4),
+        vbus_avg_uv: i32_at(8),
+        ibus_avg_ua: i32_at(12),
+    })
 }
 
 // CY4500 record conventions (see `protocol.rs`).

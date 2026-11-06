@@ -79,6 +79,33 @@ enum Command {
         scope: bool,
     },
 
+    /// Measure current with a POWER-Z KM003C at µA resolution until Ctrl+C,
+    /// with a rolling window average (e.g. for USB suspend current).
+    Meter {
+        /// Pass/fail limit for the worst window average, e.g. 2.5mA, 2500uA
+        /// or 0.0025A (a bare number is mA).
+        #[arg(long, value_parser = parse_current)]
+        limit: Option<f64>,
+
+        /// Averaging window in seconds.
+        #[arg(long, default_value_t = 1.0, value_parser = parse_window)]
+        window: f64,
+
+        /// Zero offset to subtract from every reading (same units as
+        /// --limit). Measure it by running with nothing attached: it is the
+        /// mean of that run.
+        #[arg(long, value_parser = parse_current, allow_hyphen_values = true, default_value = "0")]
+        offset: f64,
+
+        /// Stop after this many seconds instead of waiting for Ctrl+C.
+        #[arg(long)]
+        duration: Option<f64>,
+
+        /// Also save every reading to this CSV file.
+        #[arg(long, value_name = "FILE")]
+        csv: Option<PathBuf>,
+    },
+
     /// List attached analyzers (CY4500 and POWER-Z KM003C).
     List,
 
@@ -127,6 +154,13 @@ fn run() -> Result<()> {
             events,
             scope,
         } => dump_captures(&inputs, events, scope),
+        Command::Meter {
+            limit,
+            window,
+            offset,
+            duration,
+            csv,
+        } => meter(limit, window, offset, duration, csv.as_deref()),
         Command::Record {
             output,
             format,
@@ -311,6 +345,137 @@ fn record(
     }
 
     write_outputs(output, format, &decoder)?;
+    Ok(())
+}
+
+fn parse_current(s: &str) -> Result<f64, String> {
+    cedar::meter::parse_current(s)
+}
+
+fn parse_window(s: &str) -> Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(v) if v.is_finite() && v >= 0.01 => Ok(v),
+        _ => Err(format!("invalid window {s:?} (seconds, at least 0.01)")),
+    }
+}
+
+fn meter(
+    limit: Option<f64>,
+    window_s: f64,
+    offset_ua: f64,
+    duration: Option<f64>,
+    csv: Option<&Path>,
+) -> Result<()> {
+    use cedar::meter::{Meter, CSV_HEADER};
+    use std::io::{IsTerminal, Write};
+    use std::time::{Duration, Instant};
+
+    let dev = km003c::find_device()?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "No POWER-Z KM003C found (looking for {:#06x}:{:#06x}).",
+            km003c::VID,
+            km003c::PID
+        )
+    })?;
+    let km = km003c::Km003c::open(&dev)?;
+    km.connect()?;
+
+    let mut csv_file = match csv {
+        Some(path) => {
+            let mut f = std::io::BufWriter::new(
+                std::fs::File::create(path)
+                    .with_context(|| format!("creating {}", path.display()))?,
+            );
+            f.write_all(CSV_HEADER.as_bytes())?;
+            Some(f)
+        }
+        None => None,
+    };
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_handler = Arc::clone(&stop);
+    ctrlc::set_handler(move || stop_handler.store(true, Ordering::Relaxed))
+        .context("setting Ctrl+C handler")?;
+
+    println!(
+        "Measuring with POWER-Z KM003C. {}",
+        match duration {
+            Some(d) => format!("Stopping after {d} s (or Ctrl+C)."),
+            None => "Press Ctrl+C to stop.".to_string(),
+        }
+    );
+    let mut meter = Meter::new((window_s * 1e6).round() as u64, offset_ua);
+    let start = Instant::now();
+    let tty = std::io::stderr().is_terminal();
+    let mut last_draw: Option<Instant> = None;
+    let mut drawn_lines = 0usize;
+    let draw = |meter: &Meter, drawn_lines: &mut usize| {
+        let Some(r) = meter.reading() else { return };
+        let verdict = meter.verdict(limit.unwrap_or(f64::INFINITY));
+        let lines = r.status_lines(limit, verdict);
+        let mut err = std::io::stderr();
+        if tty {
+            if *drawn_lines > 0 {
+                let _ = write!(err, "\x1b[{}A", drawn_lines);
+            }
+            for line in &lines {
+                let _ = write!(err, "\r\x1b[2K{line}\n");
+            }
+            *drawn_lines = lines.len();
+        } else {
+            let _ = writeln!(err, "{}", lines[0].trim_start());
+        }
+        let _ = err.flush();
+    };
+
+    let result = (|| -> Result<()> {
+        while !stop.load(Ordering::Relaxed) {
+            if duration.is_some_and(|d| start.elapsed().as_secs_f64() >= d) {
+                break;
+            }
+            let sample = km.poll_adc()?;
+            let t_us = start.elapsed().as_micros() as u64;
+            meter.push(t_us, sample);
+            if let Some(f) = csv_file.as_mut() {
+                f.write_all(cedar::meter::csv_row(t_us, &sample, offset_ua).as_bytes())?;
+            }
+            let interval = if tty {
+                Duration::from_millis(250)
+            } else {
+                Duration::from_secs(2)
+            };
+            if last_draw.map_or(true, |t| t.elapsed() >= interval) {
+                last_draw = Some(Instant::now());
+                draw(&meter, &mut drawn_lines);
+            }
+            std::thread::sleep(Duration::from_millis(km003c::POLL_INTERVAL_MS));
+        }
+        Ok(())
+    })();
+    if let Some(mut f) = csv_file {
+        f.flush()?;
+    }
+    result?;
+
+    let Some(r) = meter.reading() else {
+        bail!("no readings taken");
+    };
+    let verdict = meter.verdict(limit.unwrap_or(f64::INFINITY));
+    if tty {
+        draw(&meter, &mut drawn_lines);
+    }
+    println!();
+    print!("{}", r.summary(limit, verdict));
+    // A small mean with no offset set looks like a zero-load run.
+    if offset_ua == 0.0 && r.mean_ua.abs() < 5000.0 {
+        println!(
+            "If nothing was attached, this was the zero offset: pass --offset {:.3}mA to subtract it.",
+            r.mean_ua / 1000.0
+        );
+    }
+    if let Some(path) = csv {
+        println!("Wrote {}", path.display());
+    }
     Ok(())
 }
 

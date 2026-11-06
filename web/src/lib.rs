@@ -9,6 +9,7 @@
 use std::fmt::Write as _;
 
 use cedar::km003c::{self, Command, Converter};
+use cedar::meter::{self, Meter};
 use cedar::pd_session::{analyze, Session};
 use cedar::protocol::{self, Decoder, GraphSample, Packet};
 use cedar::{dump, reader, report, writer};
@@ -84,6 +85,7 @@ fn km003c_command(name: &str) -> Result<Command, JsError> {
         "monitorOn" => Command::PdMonitorOn,
         "monitorOff" => Command::PdMonitorOff,
         "poll" => Command::PollPd,
+        "adc" => Command::PollAdc,
         _ => return Err(JsError::new(&format!("unknown KM003C command {name:?}"))),
     })
 }
@@ -93,7 +95,7 @@ fn js_err(e: anyhow::Error) -> JsError {
 }
 
 /// Request bytes for KM003C command `name` (`connect`, `monitorOn`,
-/// `monitorOff`, `poll`) with transaction id `id`.
+/// `monitorOff`, `poll`, `adc`) with transaction id `id`.
 #[wasm_bindgen(js_name = km003cRequest)]
 pub fn km003c_request(name: &str, id: u8) -> Result<Vec<u8>, JsError> {
     Ok(km003c_command(name)?.header(id).to_vec())
@@ -290,6 +292,112 @@ impl Capture {
     #[wasm_bindgen(js_name = rawLog)]
     pub fn raw_log(&self) -> String {
         self.raw.clone()
+    }
+}
+
+/// Parse a current such as `2.5mA` or `2500uA` (a bare number is mA) to µA.
+#[wasm_bindgen(js_name = parseCurrent)]
+pub fn parse_current(s: &str) -> Result<f64, JsError> {
+    meter::parse_current(s).map_err(|e| JsError::new(&e))
+}
+
+/// KM003C current measurement, as `cedar meter`: feed it `adc` responses and
+/// read back the windowed statistics. Every reading is also kept as a CSV row.
+#[wasm_bindgen(js_name = CurrentMeter)]
+pub struct CurrentMeter {
+    meter: Meter,
+    /// Time of the first reading since the last reset, in ms.
+    start_ms: Option<f64>,
+    csv: String,
+}
+
+#[wasm_bindgen(js_class = CurrentMeter)]
+impl CurrentMeter {
+    /// A meter averaging over `window_s` seconds that subtracts `offset_ua`.
+    #[wasm_bindgen(constructor)]
+    pub fn new(window_s: f64, offset_ua: f64) -> CurrentMeter {
+        CurrentMeter {
+            meter: Meter::new(window_us(window_s), offset_ua),
+            start_ms: None,
+            csv: String::new(),
+        }
+    }
+
+    /// Feed one complete `adc` response read at `t_ms` (any monotonic clock,
+    /// e.g. `performance.now()`).
+    pub fn feed(&mut self, resp: &[u8], t_ms: f64) -> Result<(), JsError> {
+        let sample = km003c::adc_sample(resp).map_err(js_err)?;
+        let start = *self.start_ms.get_or_insert(t_ms);
+        let t_us = ((t_ms - start).max(0.0) * 1000.0).round() as u64;
+        self.meter.push(t_us, sample);
+        self.csv
+            .push_str(&meter::csv_row(t_us, &sample, self.meter.offset_ua()));
+        Ok(())
+    }
+
+    /// The current figures as JSON (µA, see `cedar::meter::Reading`), or
+    /// `null` before the first reading.
+    #[wasm_bindgen(js_name = readingJson)]
+    pub fn reading_json(&self) -> String {
+        self.meter
+            .reading()
+            .map_or("null".to_string(), |r| r.json())
+    }
+
+    /// `pending`, `pass` or `fail` against `limit_ua`.
+    pub fn verdict(&self, limit_ua: f64) -> String {
+        self.meter.verdict(limit_ua).as_str().to_string()
+    }
+
+    /// Take the mean so far as the zero and restart; returns the new offset
+    /// in µA, or `undefined` if there were no readings.
+    pub fn zero(&mut self) -> Option<f64> {
+        let z = self.meter.zero();
+        if z.is_some() {
+            self.restart();
+        }
+        z
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn offset(&self) -> f64 {
+        self.meter.offset_ua()
+    }
+
+    #[wasm_bindgen(js_name = setOffset)]
+    pub fn set_offset(&mut self, offset_ua: f64) {
+        self.meter.set_offset(offset_ua);
+        self.restart();
+    }
+
+    #[wasm_bindgen(js_name = setWindow)]
+    pub fn set_window(&mut self, window_s: f64) {
+        self.meter.set_window(window_us(window_s));
+        self.restart();
+    }
+
+    /// Discard the statistics and the CSV log.
+    pub fn reset(&mut self) {
+        self.meter.reset();
+        self.restart();
+    }
+
+    /// Every reading since the last reset, as `cedar meter --csv` writes.
+    pub fn csv(&self) -> String {
+        format!("{}{}", meter::CSV_HEADER, self.csv)
+    }
+
+    fn restart(&mut self) {
+        self.start_ms = None;
+        self.csv.clear();
+    }
+}
+
+fn window_us(window_s: f64) -> u64 {
+    if window_s.is_finite() && window_s > 0.0 {
+        (window_s * 1e6).round() as u64
+    } else {
+        meter::DEFAULT_WINDOW_US
     }
 }
 

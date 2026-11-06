@@ -92,6 +92,9 @@ cedar record capture.html --analyzer km003c
 
 # KM003C only: also save the raw poll responses (for bug reports / fixtures)
 cedar record capture.html --raw capture.km003c.txt
+
+# KM003C current meter at µA resolution (see "Measuring low currents")
+cedar meter --limit 2.5mA
 ```
 
 A capture runs until you press <kbd>Ctrl</kbd>+<kbd>C</kbd>, at which point the
@@ -131,6 +134,51 @@ from a rules file that sorts before `73-seat-late.rules`. Earlier versions
 shipped the CY4500 rule as `99-cy4500.rules`, which therefore never granted
 access; if you installed it, remove it with
 `sudo rm /etc/udev/rules.d/99-cy4500.rules`.
+
+## Measuring low currents
+
+`cedar meter` turns a KM003C into a low-current meter, for checks such as the
+2.5 mA USB suspend limit. It polls the meter's measurement block, which has
+1 µA resolution. (The PD status block that `cedar record` uses reports whole
+mA.) It reads about 100 times a second and keeps a rolling window average,
+1 s by default, because limits like the suspend current apply to an average
+rather than to single readings. It also shows the worst window so far and the
+running mean, standard deviation, minimum and maximum:
+
+```sh
+cedar meter --limit 2.5mA                      # until Ctrl+C
+cedar meter --limit 2.5mA --duration 30 --csv suspend.csv
+cedar meter --window 0.5                       # other averaging window (s)
+```
+
+```
+  now: 0.412 mA   1 s avg: 0.398 mA   meter 1 s avg: 0.401 mA   VBUS 5.081 V
+  mean: 0.399 mA   std dev: 0.061 mA   min: 0.240 mA   max: 1.912 mA
+  worst 1 s avg: 0.433 mA at 7.2 s   worst meter 1 s avg: 0.429 mA
+  limit 2.500 mA: PASS   offset: 0.000 mA   1180 readings, 97/s, 12 s
+```
+
+The KM003C also reports its own 1 s average. In testing it changed once a
+second and matched the mean of cedar's readings over the previous second to
+within 0.3 %, so it is a block average. It is probably computed from the
+meter's full internal sample rate, so it can include short spikes that
+cedar's polling misses. The limit check fails if either cedar's worst window
+or the meter's worst 1 s average reaches the limit.
+
+**Zero offset.** With nothing attached, the meter reads a few hundred µA either
+side of zero. Run `cedar meter` with the device under test unplugged from the
+meter's output. The summary reports the mean of that run, and passing it back
+as `--offset` (for example `--offset 0.12mA`) subtracts it from later runs.
+
+The current is signed: it reads negative when power flows from the meter's
+male to its female port. Limits compare magnitudes. To measure suspend current,
+put the meter between the host and the device, then suspend the bus, for
+example by suspending the host or enabling runtime autosuspend for the device
+(`echo auto > /sys/bus/usb/devices/<port>/power/control`). Check that the
+device really is suspended before trusting the number.
+
+The web UI has the same meter on its **Current meter** page, with a live
+trace of the last 30 s, a **Zero** button, and CSV export.
 
 ## POWER-Z KM003C
 
@@ -176,6 +224,11 @@ current, power, the contract and the PD messages live, and afterwards shows
 the HTML report and text decode and saves `.ccgx3`, `.csv`, the report, and
 (for the KM003C) the raw poll log. It also opens existing `.ccgx3` files; open
 several to compare them in one report. Files never leave the browser.
+
+Its **Current meter** page (`#meter`) is `cedar meter` in the browser: the
+window average against a limit, the worst window, statistics, a live trace,
+zeroing (the offset is remembered in the browser), and a CSV of every
+reading.
 
 It builds with [Trunk](https://trunkrs.dev), as configured in `Trunk.toml`:
 

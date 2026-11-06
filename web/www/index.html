@@ -12,14 +12,20 @@
 <link data-trunk rel="rust" href="../Cargo.toml" data-bindgen-target="web">
 <link data-trunk rel="css" href="style.css">
 <script data-trunk type="module" src="app.js"></script>
+<!-- Imported by app.js; Trunk doesn't follow imports, so copy it as is. -->
+<link data-trunk rel="copy-file" href="meter.js">
 </head>
 <body>
 <header class="top">
   <div class="brand">
     <h1>cedar</h1>
-    <p>USB Power Delivery capture for the CY4500 EZ-PD Analyzer and POWER-Z KM003C</p>
+    <p>USB Power Delivery capture and current measurement for the CY4500 EZ-PD Analyzer and POWER-Z KM003C</p>
   </div>
-  <label class="open-btn button">
+  <nav class="views" aria-label="Views">
+    <a id="nav-capture" href="#capture" aria-current="page">PD capture</a>
+    <a id="nav-meter" href="#meter">Current meter</a>
+  </nav>
+  <label class="open-btn button" id="open-btn">
     <input id="file-input" type="file" accept=".ccgx3" multiple>
     Open captures…
   </label>
@@ -33,6 +39,7 @@
   </p>
   <p id="notice" class="notice error" role="alert" hidden></p>
 
+  <div id="view-capture">
   <section class="bench" aria-label="Analyzer">
     <div class="analyzer">
       <div class="device">
@@ -117,6 +124,105 @@
       <pre id="dump" class="dump"></pre>
     </div>
   </section>
+  </div>
+
+  <div id="view-meter" hidden>
+  <section class="bench armed" aria-label="Current meter">
+    <div class="analyzer">
+      <div class="device">
+        <span id="m-dot" class="dot" aria-hidden="true"></span>
+        <div>
+          <div id="m-device-name" class="device-name">No meter selected</div>
+          <div id="m-device-detail" class="device-detail">Plug in a POWER-Z KM003C, then choose it.</div>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="m-choose" type="button" class="button">Choose meter</button>
+        <button id="m-start" type="button" class="button primary" disabled>Start</button>
+        <button id="m-stop" type="button" class="button stop" hidden>Stop</button>
+      </div>
+    </div>
+
+    <div class="readout meter-readout blank" aria-live="off">
+      <div class="figure">
+        <div class="value"><span id="m-window">0.000</span><span class="unit">mA</span></div>
+        <div class="label" id="m-window-label">1 s average</div>
+      </div>
+      <div class="figure">
+        <div class="value"><span id="m-now">0.000</span><span class="unit">mA</span></div>
+        <div class="label">Now</div>
+      </div>
+      <div class="figure">
+        <div class="value"><span id="m-meteravg">0.000</span><span class="unit">mA</span></div>
+        <div class="label" title="The KM003C's own 1 s average, from its full internal sample rate. Updates once a second.">Meter's 1 s average</div>
+      </div>
+      <dl class="side">
+        <div><dt>VBUS</dt><dd id="m-vbus">–</dd></div>
+        <div><dt>Readings</dt><dd id="m-readings">–</dd></div>
+        <div><dt>Elapsed</dt><dd id="m-elapsed">–</dd></div>
+        <div><dt>Zero offset</dt><dd id="m-offset">none</dd></div>
+      </dl>
+    </div>
+
+    <div class="limit-bar">
+      <label class="field">Limit
+        <input id="m-limit" type="text" value="2.5mA" spellcheck="false" autocomplete="off" inputmode="decimal" aria-describedby="m-verdict-text">
+      </label>
+      <label class="field">Window
+        <span class="with-unit"><input id="m-window-s" type="number" min="0.1" max="60" step="0.1" value="1"><span>s</span></span>
+      </label>
+      <div id="m-verdict" class="verdict pending" role="status">
+        <span id="m-verdict-icon" class="verdict-icon" aria-hidden="true">…</span>
+        <strong id="m-verdict-label">Pending</strong>
+        <span id="m-verdict-text"></span>
+      </div>
+    </div>
+
+    <dl class="session meter-stats">
+      <div><dt id="m-worst-label">Worst 1 s average</dt><dd id="m-worst">–</dd></div>
+      <div><dt>Worst meter 1 s average</dt><dd id="m-worst-meter">–</dd></div>
+      <div><dt>Mean</dt><dd id="m-mean">–</dd></div>
+      <div><dt>Std dev</dt><dd id="m-std">–</dd></div>
+      <div><dt>Min</dt><dd id="m-min">–</dd></div>
+      <div><dt>Max</dt><dd id="m-max">–</dd></div>
+    </dl>
+
+    <div class="trace">
+      <div class="trace-head">
+        <span class="trace-title">Current (mA), last 30 s</span>
+        <span class="legend">
+          <span><i class="key-band" aria-hidden="true"></i>Readings (range)</span>
+          <span><i class="key-line" aria-hidden="true"></i><span id="m-legend-avg">Window average</span></span>
+          <span><i class="key-limit" aria-hidden="true"></i>Limit</span>
+        </span>
+      </div>
+      <div class="trace-plot">
+        <svg id="m-chart" role="img" aria-label="Current readings and window average over the last 30 seconds"></svg>
+        <p id="m-trace-empty" class="log-empty">The trace appears here while measuring.</p>
+        <div id="m-tip" class="tip" hidden>
+          <div id="m-tip-t" class="tip-t"></div>
+          <div><i class="key-band" aria-hidden="true"></i>Reading <b id="m-tip-i"></b></div>
+          <div><i class="key-line" aria-hidden="true"></i>Window avg <b id="m-tip-w"></b></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="meter-tools">
+      <div class="tool-buttons">
+        <button id="m-zero" type="button" class="button" disabled>Zero</button>
+        <button id="m-clear-zero" type="button" class="button" hidden>Clear zero</button>
+        <button id="m-reset" type="button" class="button" disabled>Reset statistics</button>
+        <button id="m-csv" type="button" class="button" disabled>Save .csv</button>
+      </div>
+      <p class="hint">
+        To zero the meter, disconnect the device under test from it, measure for
+        a few seconds, then press <b>Zero</b>. The offset is kept in this browser.
+        Negative currents mean power flows from the meter's male to its female
+        port. The command-line equivalent is <code>cedar meter --limit 2.5mA</code>.
+      </p>
+    </div>
+  </section>
+  </div>
 </main>
 
 <div id="drop" class="drop" hidden><p>Drop .ccgx3 files to open them</p></div>
