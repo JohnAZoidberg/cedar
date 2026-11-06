@@ -179,14 +179,17 @@ several to compare them in one report. Files never leave the browser.
 
 ```sh
 rustup target add wasm32-unknown-unknown
-cargo install wasm-bindgen-cli --version 0.2.130 --locked  # must match Cargo.lock
+# The CLI must match the wasm-bindgen crate in Cargo.lock; build.sh prints it.
+cargo install wasm-bindgen-cli --version "$(web/build.sh --wasm-bindgen-version)" --locked
 web/build.sh
-python3 -m http.server -d web/www 8000                     # then open http://localhost:8000
+python3 -m http.server -d web/www 8000   # then open http://localhost:8000
 ```
 
 `web/www` is a static site. WebUSB only works on HTTPS pages (or
 `localhost`) and only in Chromium-based browsers (Chrome, Edge, Opera);
-opening captures works in any browser.
+opening captures works in any browser. `.github/workflows/web.yml` builds it
+on every push and deploys `main` to GitHub Pages (set the repository's Pages
+source to "GitHub Actions").
 
 Both analyzers declare Microsoft OS descriptors that bind WinUSB
 automatically, so on Windows they work without installing a driver. On Linux

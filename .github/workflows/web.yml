@@ -1,0 +1,65 @@
+name: Web UI
+
+# Builds the WebAssembly web UI on every push and pull request, and deploys
+# it to GitHub Pages from main. Pages must be set to "GitHub Actions" as its
+# source (Settings → Pages).
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - name: Clippy (core library and web bindings, wasm32)
+        run: |
+          cargo clippy -p cedar --no-default-features --lib --target wasm32-unknown-unknown -- -D warnings
+          cargo clippy -p cedar-web --target wasm32-unknown-unknown -- -D warnings
+      - name: Find wasm-bindgen version
+        id: wb
+        run: echo "version=$(web/build.sh --wasm-bindgen-version)" >> "$GITHUB_OUTPUT"
+      - name: Install wasm-bindgen CLI
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ steps.wb.outputs.version }}
+      - name: Build
+        run: web/build.sh
+      - name: Check the page's files exist
+        run: |
+          for f in index.html app.js style.css pkg/cedar_web.js pkg/cedar_web_bg.wasm; do
+            test -s "web/www/$f" || { echo "missing web/www/$f"; exit 1; }
+          done
+      - name: Upload Pages artifact
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/www
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
