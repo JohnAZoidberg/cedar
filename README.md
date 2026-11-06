@@ -124,7 +124,9 @@ comment in the file).
 
 ## POWER-Z KM003C
 
-`cedar record` uses a KM003C automatically when no CY4500 is attached. The
+`cedar record` uses a KM003C automatically when no CY4500 is attached. For
+what each device can and cannot capture, see
+[docs/analyzer-comparison.md](docs/analyzer-comparison.md). The
 output files are the same: PD events are converted into CY4500 packet records,
 so `.ccgx3` captures from the KM003C open in the original EZ-PD utility and
 work with `cedar report` / `cedar dump`.
