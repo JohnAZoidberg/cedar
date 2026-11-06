@@ -6,7 +6,7 @@
 //! (decoding, file formats, reports) are built; that is what the WebAssembly
 //! front end in `web/` uses.
 
-#[cfg(feature = "cli")]
+#[cfg(feature = "devices")]
 pub mod capture;
 pub mod dump;
 pub mod java_serial;

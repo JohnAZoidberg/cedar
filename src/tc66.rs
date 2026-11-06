@@ -15,9 +15,9 @@ use aes::cipher::{generic_array::GenericArray, BlockDecrypt, KeyInit};
 use aes::Aes256;
 use anyhow::{bail, Result};
 
-#[cfg(feature = "cli")]
+#[cfg(feature = "devices")]
 mod serial;
-#[cfg(feature = "cli")]
+#[cfg(feature = "devices")]
 pub use serial::{describe_devices, find_port, Tc66};
 
 pub const VID: u16 = 0x28e9;

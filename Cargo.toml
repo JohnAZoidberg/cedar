@@ -15,9 +15,13 @@ required-features = ["cli"]
 
 [features]
 default = ["cli"]
-# The command-line tool and its libusb/serial capture backends. Disable to
-# build the decoding/report library on its own (e.g. for WebAssembly, see web/).
-cli = ["dep:rusb", "dep:serialport", "dep:clap", "dep:ctrlc", "dep:env_logger"]
+# The command-line tool. Disable to build the decoding/report library on its
+# own (e.g. for WebAssembly, see web/).
+cli = ["devices", "dep:clap", "dep:ctrlc", "dep:env_logger"]
+# The libusb/serial device backends (CY4500, KM003C, TC66) without the CLI's
+# dependencies, for other tools that measure with these devices (e.g. a test
+# bench): `default-features = false, features = ["devices"]`.
+devices = ["dep:rusb", "dep:serialport"]
 
 [dependencies]
 rusb = { version = "0.9", optional = true }

@@ -260,6 +260,65 @@ pub struct GraphSample {
     pub time_stamp: i64,
 }
 
+/// One oscilloscope sample as the analyzer sends it, before the reference
+/// tool's conversion. [`GraphSample`] keeps only the magnitude of the current,
+/// truncated to whole mA (one ADC count is about 2.8 mA); a meter averaging
+/// many samples needs the sign and the fraction, which this keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScopeRecord {
+    /// Device time in µs. 32 bits, so it wraps after about 71 minutes.
+    pub time_stamp: u32,
+    pub vbus: u16,
+    pub cc1: u16,
+    pub cc2: u16,
+    /// Current ADC count, 2048 at zero.
+    pub amp: u16,
+}
+
+impl ScopeRecord {
+    pub fn vbus_mv(&self) -> f64 {
+        f64::from(self.vbus) * 3296.0 * 11.0 / 4096.0
+    }
+
+    pub fn cc1_mv(&self) -> f64 {
+        f64::from(self.cc1) * 3296.0 / 4096.0
+    }
+
+    pub fn cc2_mv(&self) -> f64 {
+        f64::from(self.cc2) * 3296.0 / 4096.0
+    }
+
+    /// Signed current in mA, unrounded.
+    pub fn current_ma(&self) -> f64 {
+        (f64::from(self.amp) - 2048.0) * 100.0 / 36.0
+    }
+}
+
+/// The scope samples in one transfer from [`EP_IN_MEASURE`]: up to five per
+/// 64-byte record, skipping empty slots and the sentinel the reference
+/// discards. Timestamps are left as sent (not de-wrapped).
+pub fn scope_records(input: &[u8]) -> Vec<ScopeRecord> {
+    let length = input.len() / RECORD_SIZE * RECORD_SIZE;
+    let mut out = Vec::with_capacity(length / RECORD_SIZE * 5);
+    for i in (0..length).step_by(RECORD_SIZE) {
+        for j in 0..5usize {
+            let s = i + j * 12;
+            let ts = u32_le(input, s);
+            if ts == 0 || u64::from(ts) == SCOPE_TS_SENTINEL {
+                continue;
+            }
+            out.push(ScopeRecord {
+                time_stamp: ts,
+                vbus: u16_le(input, s + 4),
+                cc1: u16_le(input, s + 6),
+                cc2: u16_le(input, s + 8),
+                amp: u16_le(input, s + 10),
+            });
+        }
+    }
+    out
+}
+
 /// Stateful decoder that reconstructs packets and scope samples from the raw
 /// bulk transfers. The state (timestamp wrap accumulators, residual chunk
 /// queue, running delta) is exactly what the reference implementation keeps.
@@ -463,61 +522,45 @@ impl Decoder {
     /// Feed a raw transfer read from `EP_IN_MEASURE`. Mirrors
     /// `ScopeCollecter.run`.
     pub fn feed_scope(&mut self, input: &[u8]) {
-        let mut length = input.len();
-        if length % RECORD_SIZE != 0 {
-            length = length / RECORD_SIZE * RECORD_SIZE;
-        }
-        let mut i = 0usize;
-        while i < length {
-            for j in 0..5usize {
-                let s = i + j * 12;
-                let ts = u32_le(input, s) as u64;
-                if ts == 0 || ts == SCOPE_TS_SENTINEL {
-                    continue;
-                }
-                if ts < self.prev_graph_ts {
-                    self.add_factor_graph += TIMESTAMP_RECEIVED_MAX;
-                }
-                let ts_calc = (ts + self.add_factor_graph) as i64;
-                self.prev_graph_ts = ts;
-
-                let vbus = u16_le(input, s + 4) as i32;
-                let cc1 = u16_le(input, s + 6) as i32;
-                let cc2 = u16_le(input, s + 8) as i32;
-                let cur = u16_le(input, s + 10) as i32;
-
-                let cur = if cur < 2048 {
-                    (2048 - cur) * 100 / 36
-                } else {
-                    (cur - 2048) * 100 / 36
-                };
-                let vbus = vbus * 3296 * 11 / 4096;
-                let cc1 = cc1 * 3296 / 4096;
-                let cc2 = cc2 * 3296 / 4096;
-
-                let sample = GraphSample {
-                    cc1: cc1 as i16,
-                    cc2: cc2 as i16,
-                    amp: cur as i16,
-                    volt: vbus as i16,
-                    time_stamp: ts_calc,
-                };
-                if self.scope.is_empty() {
-                    self.scope.push(GraphSample {
-                        cc1: 0,
-                        cc2: 0,
-                        amp: 0,
-                        volt: 0,
-                        time_stamp: sample.time_stamp - 2,
-                    });
-                    self.scope.push(GraphSample {
-                        time_stamp: sample.time_stamp - 1,
-                        ..sample
-                    });
-                }
-                self.scope.push(sample);
+        for r in scope_records(input) {
+            let ts = u64::from(r.time_stamp);
+            if ts < self.prev_graph_ts {
+                self.add_factor_graph += TIMESTAMP_RECEIVED_MAX;
             }
-            i += RECORD_SIZE;
+            let ts_calc = (ts + self.add_factor_graph) as i64;
+            self.prev_graph_ts = ts;
+
+            let cur = r.amp as i32;
+            let cur = if cur < 2048 {
+                (2048 - cur) * 100 / 36
+            } else {
+                (cur - 2048) * 100 / 36
+            };
+            let vbus = r.vbus as i32 * 3296 * 11 / 4096;
+            let cc1 = r.cc1 as i32 * 3296 / 4096;
+            let cc2 = r.cc2 as i32 * 3296 / 4096;
+
+            let sample = GraphSample {
+                cc1: cc1 as i16,
+                cc2: cc2 as i16,
+                amp: cur as i16,
+                volt: vbus as i16,
+                time_stamp: ts_calc,
+            };
+            if self.scope.is_empty() {
+                self.scope.push(GraphSample {
+                    cc1: 0,
+                    cc2: 0,
+                    amp: 0,
+                    volt: 0,
+                    time_stamp: sample.time_stamp - 2,
+                });
+                self.scope.push(GraphSample {
+                    time_stamp: sample.time_stamp - 1,
+                    ..sample
+                });
+            }
+            self.scope.push(sample);
         }
     }
 }
@@ -612,6 +655,33 @@ mod tests {
         assert_eq!(group_us(6649), "6,649");
         assert_eq!(group_us(0), "0");
         assert_eq!(group_us(-1234567), "-1,234,567");
+    }
+
+    #[test]
+    fn scope_records_keep_sign_and_fraction() {
+        // Two samples in slots 0 and 2 of one record; slot 1 empty, slot 3
+        // the sentinel.
+        let mut rec = [0u8; RECORD_SIZE];
+        let put = |rec: &mut [u8; RECORD_SIZE], slot: usize, ts: u32, amp: u16| {
+            let s = slot * 12;
+            rec[s..s + 4].copy_from_slice(&ts.to_le_bytes());
+            rec[s + 4..s + 6].copy_from_slice(&565u16.to_le_bytes()); // ~5 V
+            rec[s + 10..s + 12].copy_from_slice(&amp.to_le_bytes());
+        };
+        put(&mut rec, 0, 1000, 2050);
+        put(&mut rec, 2, 2000, 2047);
+        put(&mut rec, 3, SCOPE_TS_SENTINEL as u32, 2100);
+        let got = scope_records(&rec);
+        assert_eq!(got.len(), 2);
+        assert!((got[0].current_ma() - 200.0 / 36.0).abs() < 1e-9);
+        assert!((got[1].current_ma() + 100.0 / 36.0).abs() < 1e-9);
+        assert!((got[0].vbus_mv() - 5001.2).abs() < 0.1);
+
+        // The reference conversion still stores whole-mA magnitudes.
+        let mut dec = Decoder::new();
+        dec.feed_scope(&rec);
+        let amps: Vec<i16> = dec.scope.iter().map(|g| g.amp).collect();
+        assert_eq!(amps, [0, 5, 5, 2]);
     }
 
     #[test]

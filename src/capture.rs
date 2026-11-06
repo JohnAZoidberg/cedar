@@ -11,8 +11,9 @@ use rusb::{Device, DeviceHandle, GlobalContext};
 
 use crate::pd_session::{analyze, Summary};
 use crate::protocol::{
-    cmd_get_version, cmd_start, cmd_stop, Decoder, GraphSample, EP_IN_CC_DATA, EP_IN_CMD_RESP,
-    EP_IN_MEASURE, EP_OUT_CMD, MAX_READ_SIZE, MAX_SCOPE_READ_SIZE, PID, PID_NO_WINUSB, VID,
+    cmd_get_version, cmd_start, cmd_stop, scope_records, Decoder, GraphSample, ScopeRecord,
+    EP_IN_CC_DATA, EP_IN_CMD_RESP, EP_IN_MEASURE, EP_OUT_CMD, MAX_READ_SIZE, MAX_SCOPE_READ_SIZE,
+    PID, PID_NO_WINUSB, VID,
 };
 
 const CMD_TIMEOUT: Duration = Duration::from_millis(1000);
@@ -156,6 +157,42 @@ impl Analyzer {
         self.handle
             .write_bulk(EP_OUT_CMD, &cmd_stop(), CMD_TIMEOUT)?;
         Ok(())
+    }
+
+    /// Start streaming, for a caller that runs its own read loop with
+    /// [`Self::read_scope`] and [`Self::read_packets`] instead of
+    /// [`Self::capture`]. End it with [`Self::stop_streaming`].
+    pub fn start_streaming(&self) -> Result<()> {
+        self.start()
+    }
+
+    pub fn stop_streaming(&self) -> Result<()> {
+        self.stop()
+    }
+
+    /// One transfer of oscilloscope samples (about 1000 per second while
+    /// streaming), waiting up to `timeout`. Empty on a timeout.
+    pub fn read_scope(&self, timeout: Duration) -> Result<Vec<ScopeRecord>> {
+        let mut buf = vec![0u8; MAX_SCOPE_READ_SIZE];
+        match self.handle.read_bulk(EP_IN_MEASURE, &mut buf, timeout) {
+            Ok(size) => Ok(scope_records(&buf[..size])),
+            Err(rusb::Error::Timeout) => Ok(Vec::new()),
+            Err(e) => bail!("read error on measure endpoint: {e}"),
+        }
+    }
+
+    /// One transfer of raw PD packet records (feed them to
+    /// [`Decoder::feed_pd`]), waiting up to `timeout`. Empty on a timeout.
+    pub fn read_packets(&self, timeout: Duration) -> Result<Vec<u8>> {
+        let mut buf = vec![0u8; MAX_READ_SIZE];
+        match self.handle.read_bulk(EP_IN_CC_DATA, &mut buf, timeout) {
+            Ok(size) => {
+                buf.truncate(size);
+                Ok(buf)
+            }
+            Err(rusb::Error::Timeout) => Ok(Vec::new()),
+            Err(e) => bail!("read error on data endpoint: {e}"),
+        }
     }
 
     /// Run the capture loop until `stop` is set, decoding into `decoder`.

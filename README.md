@@ -308,6 +308,26 @@ stopped, decoding each record exactly as the reference firmware/host software
 does (timestamp de-wrapping, chunked extended-message reassembly, VBUS/CC/
 current scaling), and finally sends `STOP`.
 
+## As a library
+
+Other tools can measure with the same devices without the CLI's dependencies:
+
+```toml
+cedar = { git = "https://github.com/johnazoidberg/cedar", default-features = false, features = ["devices"] }
+```
+
+- `km003c::{find_device, Km003c}`: `connect()`, then `poll_adc()` for µV / µA
+  readings.
+- `tc66::{find_port, Tc66}`: `measure()`.
+- `capture::{find_device, Analyzer}` (CY4500): `start_streaming()`, then
+  `read_scope()` for raw `ScopeRecord`s (about 1000 per second) with the sign
+  and fraction of the current that the `.ccgx3` model drops, and
+  `read_packets()` to drain or decode PD traffic. One ADC count is about
+  2.8 mA, so it suits currents of tens of mA and up, averaged.
+
+The Daisy keyboard test bench (aster's `daisy-bench`) uses it to measure
+VBUS current.
+
 ## Tests
 
 ```sh

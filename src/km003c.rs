@@ -21,9 +21,9 @@ use anyhow::{anyhow, bail, Result};
 
 use crate::protocol::{Decoder, GraphSample};
 
-#[cfg(feature = "cli")]
+#[cfg(feature = "devices")]
 mod usb;
-#[cfg(feature = "cli")]
+#[cfg(feature = "devices")]
 pub use usb::{describe_devices, find_device, Km003c};
 
 pub const VID: u16 = 0x5fc9;
