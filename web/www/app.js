@@ -769,7 +769,8 @@ showView(hashView());
 // ---------------------------------------------------------------------------
 // Wiring
 
-$("btn-choose").addEventListener("click", chooseAnalyzer);
+// Not passed directly: the click event would land in the `filters` parameter.
+$("btn-choose").addEventListener("click", () => chooseAnalyzer());
 $("btn-record").addEventListener("click", startRecording);
 $("btn-stop").addEventListener("click", () => stopRecording());
 $("file-input").addEventListener("change", (e) => {
