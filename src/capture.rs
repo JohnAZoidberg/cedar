@@ -11,9 +11,9 @@ use rusb::{Device, DeviceHandle, GlobalContext};
 
 use crate::pd_session::{analyze, Summary};
 use crate::protocol::{
-    cmd_get_version, cmd_start, cmd_stop, cmd_termination, Decoder, GraphSample, Termination,
-    ScopeRecord, EP_IN_CC_DATA, EP_IN_CMD_RESP, EP_IN_MEASURE, EP_OUT_CMD, MAX_READ_SIZE,
-    MAX_SCOPE_READ_SIZE, PID, PID_NO_WINUSB, VID,
+    cmd_get_version, cmd_start, cmd_stop, cmd_termination, scope_records, Decoder, GraphSample,
+    ScopeRecord, Termination, EP_IN_CC_DATA, EP_IN_CMD_RESP, EP_IN_MEASURE, EP_OUT_CMD,
+    MAX_READ_SIZE, MAX_SCOPE_READ_SIZE, PID, PID_NO_WINUSB, VID,
 };
 
 const CMD_TIMEOUT: Duration = Duration::from_millis(1000);
