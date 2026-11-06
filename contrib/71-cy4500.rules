@@ -1,0 +1,14 @@
+# Give the logged-in user access to the CY4500 EZ-PD Protocol Analyzer so
+# `cedar` can capture without root. The rule number must sort before
+# 73-seat-late.rules for the uaccess tag to take effect.
+#
+# Install with:
+#   sudo cp contrib/71-cy4500.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger --subsystem-match=usb --attr-match=idVendor=04b4
+#
+# If you installed this rule earlier as 99-cy4500.rules, remove that copy:
+#   sudo rm /etc/udev/rules.d/99-cy4500.rules
+SUBSYSTEM=="usb", ATTRS{idVendor}=="04b4", ATTRS{idProduct}=="f67e", MODE="0660", TAG+="uaccess"
+# Firmware-update mode (before the capture firmware is loaded).
+SUBSYSTEM=="usb", ATTRS{idVendor}=="04b4", ATTRS{idProduct}=="0078", MODE="0660", TAG+="uaccess"

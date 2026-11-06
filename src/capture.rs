@@ -106,9 +106,9 @@ fn open_error(dev: &Device<GlobalContext>, e: rusb::Error) -> anyhow::Error {
              Grant access with either:\n  \
              sudo chmod 666 {node}          (temporary, until the analyzer is replugged)\n\
              or install the bundled udev rule for a permanent fix:\n  \
-             sudo cp contrib/99-cy4500.rules /etc/udev/rules.d/ && \
-             sudo udevadm control --reload-rules && sudo udevadm trigger\n  \
-             (then replug the analyzer)"
+             sudo cp contrib/71-cy4500.rules /etc/udev/rules.d/ && \
+             sudo udevadm control --reload-rules && \
+             sudo udevadm trigger --subsystem-match=usb --attr-match=idVendor=04b4"
         )
     } else {
         anyhow!("failed to open device at {node}: {e}")

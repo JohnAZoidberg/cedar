@@ -113,14 +113,21 @@ By default the USB device node is owned by root, so capturing needs either
 `sudo` or a udev rule. To grant your user access, install the provided rule:
 
 ```sh
-sudo cp contrib/99-cy4500.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules && sudo udevadm trigger
+sudo cp contrib/71-cy4500.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo udevadm trigger --subsystem-match=usb --attr-match=idVendor=04b4
 ```
 
-Then replug the analyzer and run `cedar` without `sudo`.
+Then run `cedar` without `sudo`.
 
 For the KM003C, install `contrib/71-powerz-km003c.rules` instead (see the
 comment in the file).
+
+The rules grant access with systemd's `uaccess` tag, which only takes effect
+from a rules file that sorts before `73-seat-late.rules`. Earlier versions
+shipped the CY4500 rule as `99-cy4500.rules`, which therefore never granted
+access; if you installed it, remove it with
+`sudo rm /etc/udev/rules.d/99-cy4500.rules`.
 
 ## POWER-Z KM003C
 
