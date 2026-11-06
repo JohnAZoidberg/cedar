@@ -411,7 +411,11 @@ impl Decoder {
 
         // Data column.
         let mut dstr = format!("0x{:X}", u16_le(pkt, 16));
-        if get_field_extended(hdr) {
+        if get_field_extended(hdr) && pkt.len() < 22 {
+            // No extended header: the KM003C reports only the 2-byte message
+            // header of extended messages.
+            dstr.push_str(" (payload not captured)");
+        } else if get_field_extended(hdr) {
             let extd_hdr = u16_le(pkt, 20);
             let byte_count = extended_count(extd_hdr);
             dstr.push_str(&format!(" 0x{:X}", extd_hdr));

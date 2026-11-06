@@ -5,6 +5,7 @@
 pub mod capture;
 pub mod dump;
 pub mod java_serial;
+pub mod km003c;
 pub mod pd_decode;
 pub mod pd_session;
 pub mod protocol;

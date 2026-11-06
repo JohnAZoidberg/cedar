@@ -1,7 +1,7 @@
 [package]
 name = "cedar"
 version = "0.1.0"
-description = "Command-line capture tool for the Cypress/Infineon CY4500 EZ-PD Protocol Analyzer"
+description = "Command-line capture tool for the Cypress/Infineon CY4500 EZ-PD Protocol Analyzer and ChargerLab POWER-Z KM003C"
 repository = "https://github.com/FrameworkComputer/cedar"
 readme = "README.md"
 license = "BSD-3-Clause"

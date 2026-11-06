@@ -1,7 +1,8 @@
 # cedar
 
 A small command-line capture tool for the Cypress / Infineon **CY4500 EZ-PD
-Protocol Analyzer** (USB `04b4:f67e`).
+Protocol Analyzer** (USB `04b4:f67e`). It can also record from a ChargerLab
+**POWER-Z KM003C** (USB `5fc9:0063`); see [POWER-Z KM003C](#power-z-km003c).
 
 It talks to the analyzer over USB, streams USB Power Delivery packets and the
 oscilloscope (VBUS / CC / current) trace, and on <kbd>Ctrl</kbd>+<kbd>C</kbd>
@@ -64,7 +65,7 @@ cedar report a.ccgx3 b.ccgx3 -o compare.html
 cedar dump capture.ccgx3
 cedar dump --events --scope capture.ccgx3
 
-# List attached analyzers
+# List attached analyzers (CY4500 and KM003C)
 cedar list
 
 # Print the analyzer's firmware version
@@ -82,6 +83,12 @@ cedar record capture.ccgx3 --format ccgx3
 
 # Skip the oscilloscope trace (packets only; smaller files)
 cedar record capture.ccgx3 --no-scope
+
+# Pick the analyzer when both are attached (default: CY4500)
+cedar record capture.html --analyzer km003c
+
+# KM003C only: also save the raw poll responses (for bug reports / fixtures)
+cedar record capture.html --raw capture.km003c.txt
 ```
 
 A capture runs until you press <kbd>Ctrl</kbd>+<kbd>C</kbd>, at which point the
@@ -112,6 +119,43 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 
 Then replug the analyzer and run `cedar` without `sudo`.
 
+For the KM003C, install `contrib/71-powerz-km003c.rules` instead (see the
+comment in the file).
+
+## POWER-Z KM003C
+
+`cedar record` uses a KM003C automatically when no CY4500 is attached. The
+output files are the same: PD events are converted into CY4500 packet records,
+so `.ccgx3` captures from the KM003C open in the original EZ-PD utility and
+work with `cedar report` / `cedar dump`.
+
+Differences from a CY4500 capture:
+
+- **Timestamps** have 1 ms resolution. Messages that share a millisecond are
+  laid out back to back using their estimated on-the-wire duration (so the
+  *duration* column is an estimate, not a measurement).
+- **Attach/detach** rows (`VBUS_UP` / `VBUS_DN`) come from the meter's CC
+  connect/disconnect events, not from VBUS thresholds.
+- **Scope trace**: one VBUS / current / CC1 / CC2 sample per poll (about 100 Hz)
+  from the meter's status block, instead of the CY4500's high-rate stream.
+  Current is stored as a magnitude, like the CY4500.
+- **VBUS per packet** is the meter's reading from the previous poll, stored in
+  CY4500 ADC counts (about 9 mV resolution).
+- **Extended messages** (Source/Sink Capabilities Extended, Status, Battery
+  Capabilities, Manufacturer Info, EPR Source Capabilities, …) arrive with
+  only their 2-byte message header; the meter drops the payload. They show as
+  `(payload not captured)` in the data column.
+- Only SOP, SOP' and SOP'' messages are reported; the meter does not report
+  hard resets or CRC/EOP errors. `cedar version` prints the USB device version
+  only.
+
+cedar talks to the vendor bulk interface (interface 0), temporarily detaching
+the Linux `powerz` hwmon driver while it records. It does not use the HID
+interface: enabling the PD monitor over HID wedged the meter's HID endpoint,
+and polling PD data over HID rebooted it. The protocol follows the
+reverse-engineering work in
+[okhsunrog/km003c-rs](https://github.com/okhsunrog/km003c-rs).
+
 ## How it works
 
 The CY4500 exposes a vendor interface (interface 0) with four endpoints:
@@ -137,6 +181,10 @@ cargo test
 The golden tests in `tests/golden.rs` decode raw packet bytes captured by the
 original utility and assert every decoded field matches what the original tool
 stored. See `tests/fixtures/README.md` for how the fixtures are generated.
+
+`tests/km003c.rs` replays KM003C poll responses (`tests/fixtures/km003c-*.txt`,
+recorded with `cedar record --raw`) from a Framework 60 W adapter and an Apple
+display through the KM003C converter, decoder and session analysis.
 
 ## License
 

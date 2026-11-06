@@ -224,7 +224,7 @@ impl Analyzer {
 /// redraws three lines: running counts, the most recent PD message, and the
 /// latest voltage/current levels. When output is not a terminal it prints a
 /// periodic single-line summary instead.
-struct Status {
+pub(crate) struct Status {
     start: Instant,
     last_draw: Option<Instant>,
     tty: bool,
@@ -237,7 +237,7 @@ struct Status {
 }
 
 impl Status {
-    fn new(capture_scope: bool) -> Self {
+    pub(crate) fn new(capture_scope: bool) -> Self {
         Status {
             start: Instant::now(),
             last_draw: None,
@@ -252,7 +252,7 @@ impl Status {
     }
 
     /// Note new packets and, subject to throttling (or `force`), redraw.
-    fn tick(&mut self, decoder: &Decoder, force: bool) {
+    pub(crate) fn tick(&mut self, decoder: &Decoder, force: bool) {
         if decoder.packets.len() != self.packets_seen {
             for p in &decoder.packets[self.packets_seen..] {
                 if is_real_message(p) {
@@ -283,7 +283,7 @@ impl Status {
 
     /// Called before printing unrelated output so the next redraw starts fresh
     /// rather than moving the cursor over it.
-    fn interrupt(&mut self) {
+    pub(crate) fn interrupt(&mut self) {
         self.drawn = false;
     }
 

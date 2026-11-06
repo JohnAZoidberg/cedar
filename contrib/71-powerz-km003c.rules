@@ -1,0 +1,9 @@
+# Give the logged-in user access to the ChargerLab POWER-Z KM003C so `cedar`
+# can capture without root. The rule number must sort before
+# 73-seat-late.rules for the uaccess tag to take effect.
+#
+# Install with:
+#   sudo cp contrib/71-powerz-km003c.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger --subsystem-match=usb --attr-match=idVendor=5fc9
+SUBSYSTEM=="usb", ATTRS{idVendor}=="5fc9", ATTRS{idProduct}=="0063", MODE="0660", TAG+="uaccess"

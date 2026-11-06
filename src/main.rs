@@ -13,6 +13,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
 use cedar::capture;
+use cedar::km003c;
 use cedar::protocol::Decoder;
 use cedar::report;
 use cedar::writer;
@@ -39,6 +40,16 @@ enum Command {
         /// Do not capture the oscilloscope (VBUS/CC/current) trace.
         #[arg(long)]
         no_scope: bool,
+
+        /// Also save the KM003C's raw poll responses (one hex line each) to
+        /// this file, for debugging and test fixtures.
+        #[arg(long, value_name = "FILE")]
+        raw: Option<PathBuf>,
+
+        /// Which analyzer to record from. Defaults to whichever is attached
+        /// (the CY4500 if both are).
+        #[arg(long, value_enum)]
+        analyzer: Option<AnalyzerKind>,
     },
 
     /// Re-decode existing .ccgx3 capture(s) into an HTML report.
@@ -68,11 +79,19 @@ enum Command {
         scope: bool,
     },
 
-    /// List attached CY4500 analyzers.
+    /// List attached analyzers (CY4500 and POWER-Z KM003C).
     List,
 
     /// Print the analyzer's firmware version.
     Version,
+}
+
+#[derive(Copy, Clone, ValueEnum)]
+enum AnalyzerKind {
+    /// Cypress / Infineon CY4500 EZ-PD Protocol Analyzer.
+    Cy4500,
+    /// ChargerLab POWER-Z KM003C.
+    Km003c,
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -100,7 +119,7 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::List => capture::list_devices(),
+        Command::List => list_devices(),
         Command::Version => print_version(),
         Command::Report { inputs, output } => report_captures(&inputs, output),
         Command::Dump {
@@ -112,7 +131,9 @@ fn run() -> Result<()> {
             output,
             format,
             no_scope,
-        } => record(&output, format, !no_scope),
+            analyzer,
+            raw,
+        } => record(&output, format, !no_scope, analyzer, raw.as_deref()),
     }
 }
 
@@ -161,7 +182,59 @@ fn dump_captures(inputs: &[PathBuf], events_only: bool, scope: bool) -> Result<(
     Ok(())
 }
 
+/// An attached analyzer picked for a capture.
+enum Picked {
+    Cy4500(rusb::Device<rusb::GlobalContext>),
+    Km003c(rusb::Device<rusb::GlobalContext>),
+}
+
+fn pick_analyzer(kind: Option<AnalyzerKind>) -> Result<Picked> {
+    match kind {
+        Some(AnalyzerKind::Cy4500) => Ok(Picked::Cy4500(capture::find_device()?)),
+        Some(AnalyzerKind::Km003c) => km003c::find_device()?.map(Picked::Km003c).ok_or_else(|| {
+            anyhow::anyhow!(
+                "No POWER-Z KM003C found (looking for {:#06x}:{:#06x}).",
+                km003c::VID,
+                km003c::PID
+            )
+        }),
+        None => match capture::find_device() {
+            Ok(dev) => Ok(Picked::Cy4500(dev)),
+            Err(cy_err) => match km003c::find_device()? {
+                Some(dev) => Ok(Picked::Km003c(dev)),
+                None => Err(cy_err.context(format!(
+                    "no POWER-Z KM003C found either ({:#06x}:{:#06x})",
+                    km003c::VID,
+                    km003c::PID
+                ))),
+            },
+        },
+    }
+}
+
+fn list_devices() -> Result<()> {
+    capture::list_devices()?;
+    let km = km003c::describe_devices()?;
+    if km.is_empty() {
+        println!("No POWER-Z KM003C found.");
+    }
+    for line in km {
+        println!("{line}");
+    }
+    Ok(())
+}
+
 fn print_version() -> Result<()> {
+    if let Picked::Km003c(dev) = pick_analyzer(None)? {
+        let desc = dev.device_descriptor()?;
+        let v = desc.device_version();
+        println!(
+            "POWER-Z KM003C (USB bcdDevice {}.{:02}); firmware version readout is not supported",
+            v.major(),
+            v.minor() * 10 + v.sub_minor()
+        );
+        return Ok(());
+    }
     let dev = capture::find_device()?;
     let analyzer = capture::Analyzer::open(&dev)?;
     let v = analyzer.version()?;
@@ -172,7 +245,13 @@ fn print_version() -> Result<()> {
     Ok(())
 }
 
-fn record(output: &Path, format: Option<Format>, capture_scope: bool) -> Result<()> {
+fn record(
+    output: &Path,
+    format: Option<Format>,
+    capture_scope: bool,
+    analyzer: Option<AnalyzerKind>,
+    raw: Option<&Path>,
+) -> Result<()> {
     let format = match format {
         Some(f) => f,
         None => match output.extension().and_then(|e| e.to_str()) {
@@ -186,8 +265,10 @@ fn record(output: &Path, format: Option<Format>, capture_scope: bool) -> Result<
         },
     };
 
-    let dev = capture::find_device()?;
-    let analyzer = capture::Analyzer::open(&dev)?;
+    let picked = pick_analyzer(analyzer)?;
+    if raw.is_some() && matches!(picked, Picked::Cy4500(_)) {
+        bail!("--raw is only supported for the POWER-Z KM003C");
+    }
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop_handler = Arc::clone(&stop);
@@ -196,9 +277,38 @@ fn record(output: &Path, format: Option<Format>, capture_scope: bool) -> Result<
     })
     .context("setting Ctrl+C handler")?;
 
-    println!("Recording. Press Ctrl+C to stop and save.");
     let mut decoder = Decoder::new();
-    analyzer.capture(&mut decoder, capture_scope, &stop)?;
+    match picked {
+        Picked::Cy4500(dev) => {
+            let analyzer = capture::Analyzer::open(&dev)?;
+            println!("Recording from CY4500. Press Ctrl+C to stop and save.");
+            analyzer.capture(&mut decoder, capture_scope, &stop)?;
+        }
+        Picked::Km003c(dev) => {
+            let meter = km003c::Km003c::open(&dev)?;
+            let mut raw_file = match raw {
+                Some(path) => Some(std::io::BufWriter::new(
+                    std::fs::File::create(path)
+                        .with_context(|| format!("creating {}", path.display()))?,
+                )),
+                None => None,
+            };
+            println!("Recording from POWER-Z KM003C. Press Ctrl+C to stop and save.");
+            let captured = meter.capture(
+                &mut decoder,
+                &stop,
+                raw_file.as_mut().map(|f| f as &mut dyn std::io::Write),
+            );
+            if let Some(mut f) = raw_file {
+                std::io::Write::flush(&mut f)?;
+            }
+            captured?;
+            // The KM003C's levels come with every PD poll; drop them if unwanted.
+            if !capture_scope {
+                decoder.scope.clear();
+            }
+        }
+    }
 
     write_outputs(output, format, &decoder)?;
     Ok(())
