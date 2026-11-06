@@ -38,9 +38,21 @@ pub fn dump(packets: &[Packet], scope: &[GraphSample], opts: Options) -> String 
     ] {
         let _ = writeln!(out, "  {name:<13} {}", v.as_deref().unwrap_or("-"));
     }
-    let _ = writeln!(out, "  {:<13} {} packets, {} scope samples", "size", packets.len(), scope.len());
+    let _ = writeln!(
+        out,
+        "  {:<13} {} packets, {} scope samples",
+        "size",
+        packets.len(),
+        scope.len()
+    );
     if let (Some(first), Some(last)) = (scope.first(), scope.last()) {
-        let _ = writeln!(out, "  {:<13} {} .. {}", "scope span", fmt_time(first.time_stamp), fmt_time(last.time_stamp));
+        let _ = writeln!(
+            out,
+            "  {:<13} {} .. {}",
+            "scope span",
+            fmt_time(first.time_stamp),
+            fmt_time(last.time_stamp)
+        );
     }
     let _ = writeln!(out);
 
@@ -69,7 +81,11 @@ fn packet_line(t: i64, p: &Packet, ev: Option<&Event>) -> String {
         fmt_time(t),
         p.sno,
         p.sop,
-        if p.ok == "OK" { p.msg.clone() } else { p.ok.clone() },
+        if p.ok == "OK" {
+            p.msg.clone()
+        } else {
+            p.ok.clone()
+        },
         p.p_role,
         p.d_role,
         p.vbus,
@@ -114,7 +130,11 @@ fn cc_level(mv: i16) -> &'static str {
 
 /// Debounced level transitions of VBUS, CC1 and CC2.
 fn scope_transitions(scope: &[GraphSample]) -> Vec<(i64, String)> {
-    type Probe = (&'static str, fn(&GraphSample) -> i16, fn(i16) -> &'static str);
+    type Probe = (
+        &'static str,
+        fn(&GraphSample) -> i16,
+        fn(i16) -> &'static str,
+    );
     let probes: [Probe; 3] = [
         ("VBUS", |s| s.volt, vbus_level),
         ("CC1", |s| s.cc1, cc_level),
@@ -124,15 +144,25 @@ fn scope_transitions(scope: &[GraphSample]) -> Vec<(i64, String)> {
     for (name, get, level) in probes {
         let Some(first) = scope.first() else { break };
         let mut cur = level(get(first));
-        out.push((first.time_stamp, scope_line(first.time_stamp, name, None, cur, get(first))));
+        out.push((
+            first.time_stamp,
+            scope_line(first.time_stamp, name, None, cur, get(first)),
+        ));
         let mut i = 0;
         while i < scope.len() {
             let l = level(get(&scope[i]));
             if l != cur {
-                let run = scope[i..].iter().take(DEBOUNCE).take_while(|s| level(get(s)) == l).count();
+                let run = scope[i..]
+                    .iter()
+                    .take(DEBOUNCE)
+                    .take_while(|s| level(get(s)) == l)
+                    .count();
                 if run == DEBOUNCE || i + run == scope.len() {
                     let s = &scope[i];
-                    out.push((s.time_stamp, scope_line(s.time_stamp, name, Some(cur), l, get(s))));
+                    out.push((
+                        s.time_stamp,
+                        scope_line(s.time_stamp, name, Some(cur), l, get(s)),
+                    ));
                     cur = l;
                 }
             }
