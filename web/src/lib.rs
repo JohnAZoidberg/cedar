@@ -331,7 +331,7 @@ impl CurrentMeter {
         let t_us = ((t_ms - start).max(0.0) * 1000.0).round() as u64;
         self.meter.push(t_us, sample);
         self.csv
-            .push_str(&meter::csv_row(t_us, &sample, self.meter.offset_ua()));
+            .push_str(&meter::csv_row(t_us, sample, self.meter.offset_ua()));
         Ok(())
     }
 

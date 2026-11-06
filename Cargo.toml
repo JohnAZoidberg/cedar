@@ -15,9 +15,9 @@ required-features = ["cli"]
 
 [features]
 default = ["cli"]
-# The command-line tool and its libusb capture backends. Disable to build the
-# decoding/report library on its own (e.g. for WebAssembly, see web/).
-cli = ["dep:rusb", "dep:clap", "dep:ctrlc", "dep:env_logger"]
+# The command-line tool and its libusb/serial capture backends. Disable to
+# build the decoding/report library on its own (e.g. for WebAssembly, see web/).
+cli = ["dep:rusb", "dep:serialport", "dep:clap", "dep:ctrlc", "dep:env_logger"]
 
 [dependencies]
 rusb = { version = "0.9", optional = true }
@@ -27,6 +27,9 @@ env_logger = { version = "0.11", optional = true }
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 anyhow = "1.0"
 log = "0.4"
+aes = "0.8"
+# Without libudev: on Linux, ports are found (with their USB IDs) via sysfs.
+serialport = { version = "4.10", default-features = false, optional = true }
 
 # On Windows there is no system libusb, so build the bundled copy from source.
 # On Linux/macOS we link the system libusb (installed via the package manager).

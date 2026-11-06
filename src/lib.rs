@@ -17,4 +17,5 @@ pub mod pd_session;
 pub mod protocol;
 pub mod reader;
 pub mod report;
+pub mod tc66;
 pub mod writer;

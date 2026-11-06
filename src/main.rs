@@ -16,6 +16,7 @@ use cedar::capture;
 use cedar::km003c;
 use cedar::protocol::Decoder;
 use cedar::report;
+use cedar::tc66;
 use cedar::writer;
 
 #[derive(Parser)]
@@ -79,9 +80,15 @@ enum Command {
         scope: bool,
     },
 
-    /// Measure current with a POWER-Z KM003C at µA resolution until Ctrl+C,
-    /// with a rolling window average (e.g. for USB suspend current).
+    /// Measure current until Ctrl+C with a rolling window average (e.g. for
+    /// USB suspend current), using a POWER-Z KM003C (1 µA steps, ~100
+    /// readings/s) or a TC66 (10 µA steps, ~2 readings/s).
     Meter {
+        /// Which meter to use. Defaults to the KM003C if one is attached,
+        /// otherwise a TC66.
+        #[arg(long, value_enum)]
+        device: Option<MeterKind>,
+
         /// Pass/fail limit for the worst window average, e.g. 2.5mA, 2500uA
         /// or 0.0025A (a bare number is mA).
         #[arg(long, value_parser = parse_current)]
@@ -106,7 +113,7 @@ enum Command {
         csv: Option<PathBuf>,
     },
 
-    /// List attached analyzers (CY4500 and POWER-Z KM003C).
+    /// List attached analyzers and meters (CY4500, POWER-Z KM003C, TC66).
     List,
 
     /// Print the analyzer's firmware version.
@@ -119,6 +126,14 @@ enum AnalyzerKind {
     Cy4500,
     /// ChargerLab POWER-Z KM003C.
     Km003c,
+}
+
+#[derive(Copy, Clone, ValueEnum)]
+enum MeterKind {
+    /// ChargerLab POWER-Z KM003C.
+    Km003c,
+    /// RuiDeng TC66 / TC66C USB-C meter.
+    Tc66,
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -155,12 +170,13 @@ fn run() -> Result<()> {
             scope,
         } => dump_captures(&inputs, events, scope),
         Command::Meter {
+            device,
             limit,
             window,
             offset,
             duration,
             csv,
-        } => meter(limit, window, offset, duration, csv.as_deref()),
+        } => meter(device, limit, window, offset, duration, csv.as_deref()),
         Command::Record {
             output,
             format,
@@ -253,6 +269,13 @@ fn list_devices() -> Result<()> {
         println!("No POWER-Z KM003C found.");
     }
     for line in km {
+        println!("{line}");
+    }
+    let tc = tc66::describe_devices()?;
+    if tc.is_empty() {
+        println!("No TC66 found.");
+    }
+    for line in tc {
         println!("{line}");
     }
     Ok(())
@@ -359,7 +382,109 @@ fn parse_window(s: &str) -> Result<f64, String> {
     }
 }
 
+/// The meter `cedar meter` reads from.
+enum MeterSource {
+    Km003c(km003c::Km003c),
+    Tc66 {
+        meter: tc66::Tc66,
+        /// The last reading passed on, and when it was taken.
+        last: Option<(cedar::meter::Sample, std::time::Instant)>,
+    },
+}
+
+impl MeterSource {
+    fn open(kind: Option<MeterKind>) -> Result<Self> {
+        let no_km003c = || {
+            anyhow::anyhow!(
+                "No POWER-Z KM003C found (looking for {:#06x}:{:#06x}).",
+                km003c::VID,
+                km003c::PID
+            )
+        };
+        let no_tc66 = || {
+            anyhow::anyhow!(
+                "No TC66 found (looking for a serial port on {:#06x}:{:#06x}).",
+                tc66::VID,
+                tc66::PID
+            )
+        };
+        let open_km003c = |dev| -> Result<Self> {
+            let km = km003c::Km003c::open(&dev)?;
+            km.connect()?;
+            Ok(MeterSource::Km003c(km))
+        };
+        let open_tc66 = |port: String| -> Result<Self> {
+            Ok(MeterSource::Tc66 {
+                meter: tc66::Tc66::open(&port)?,
+                last: None,
+            })
+        };
+        match kind {
+            Some(MeterKind::Km003c) => open_km003c(km003c::find_device()?.ok_or_else(no_km003c)?),
+            Some(MeterKind::Tc66) => open_tc66(tc66::find_port()?.ok_or_else(no_tc66)?),
+            None => {
+                if let Some(dev) = km003c::find_device()? {
+                    open_km003c(dev)
+                } else if let Some(port) = tc66::find_port()? {
+                    open_tc66(port)
+                } else {
+                    bail!(
+                        "No meter found: neither a POWER-Z KM003C ({:#06x}:{:#06x}) nor a TC66 ({:#06x}:{:#06x}).",
+                        km003c::VID,
+                        km003c::PID,
+                        tc66::VID,
+                        tc66::PID
+                    )
+                }
+            }
+        }
+    }
+
+    fn name(&self) -> String {
+        match self {
+            MeterSource::Km003c(_) => "POWER-Z KM003C".to_string(),
+            MeterSource::Tc66 { meter, .. } => format!("TC66 on {}", meter.port_name()),
+        }
+    }
+
+    /// Pause between polls.
+    fn poll_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(match self {
+            MeterSource::Km003c(_) => km003c::POLL_INTERVAL_MS,
+            // Several polls per refresh, so readings are timed to ~0.1 s.
+            MeterSource::Tc66 { .. } => 100,
+        })
+    }
+
+    /// Poll the meter: the next reading, or `None` if it has not refreshed
+    /// since the last one.
+    fn poll(&mut self) -> Result<Option<cedar::meter::Sample>> {
+        match self {
+            MeterSource::Km003c(km) => Ok(Some(km.poll_adc()?.into())),
+            MeterSource::Tc66 { meter, last } => {
+                let sample = cedar::meter::Sample::from(&meter.measure()?);
+                let now = std::time::Instant::now();
+                // The TC66 repeats its reading between refreshes (~2 Hz) and
+                // carries no counter: pass on changed readings, and a repeat
+                // once a refresh has surely gone by, so a steady load still
+                // fills the window.
+                let stale = std::time::Duration::from_millis(tc66::UPDATE_INTERVAL_MS * 3 / 2);
+                let fresh = match last {
+                    None => true,
+                    Some((prev, at)) => *prev != sample || now.duration_since(*at) >= stale,
+                };
+                if !fresh {
+                    return Ok(None);
+                }
+                *last = Some((sample, now));
+                Ok(Some(sample))
+            }
+        }
+    }
+}
+
 fn meter(
+    device: Option<MeterKind>,
     limit: Option<f64>,
     window_s: f64,
     offset_ua: f64,
@@ -370,15 +495,7 @@ fn meter(
     use std::io::{IsTerminal, Write};
     use std::time::{Duration, Instant};
 
-    let dev = km003c::find_device()?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "No POWER-Z KM003C found (looking for {:#06x}:{:#06x}).",
-            km003c::VID,
-            km003c::PID
-        )
-    })?;
-    let km = km003c::Km003c::open(&dev)?;
-    km.connect()?;
+    let mut source = MeterSource::open(device)?;
 
     let mut csv_file = match csv {
         Some(path) => {
@@ -398,12 +515,20 @@ fn meter(
         .context("setting Ctrl+C handler")?;
 
     println!(
-        "Measuring with POWER-Z KM003C. {}",
+        "Measuring with {}. {}",
+        source.name(),
         match duration {
             Some(d) => format!("Stopping after {d} s (or Ctrl+C)."),
             None => "Press Ctrl+C to stop.".to_string(),
         }
     );
+    if matches!(source, MeterSource::Tc66 { .. }) && window_s < 5.0 {
+        println!(
+            "Note: the TC66 refreshes about twice a second in 10 µA steps, so a {window_s} s \
+             window averages only ~{:.0} reading(s) and can miss short spikes.",
+            (window_s * 1000.0 / tc66::UPDATE_INTERVAL_MS as f64).max(1.0)
+        );
+    }
     let mut meter = Meter::new((window_s * 1e6).round() as u64, offset_ua);
     let start = Instant::now();
     let tty = std::io::stderr().is_terminal();
@@ -433,11 +558,12 @@ fn meter(
             if duration.is_some_and(|d| start.elapsed().as_secs_f64() >= d) {
                 break;
             }
-            let sample = km.poll_adc()?;
-            let t_us = start.elapsed().as_micros() as u64;
-            meter.push(t_us, sample);
-            if let Some(f) = csv_file.as_mut() {
-                f.write_all(cedar::meter::csv_row(t_us, &sample, offset_ua).as_bytes())?;
+            if let Some(sample) = source.poll()? {
+                let t_us = start.elapsed().as_micros() as u64;
+                meter.push(t_us, sample);
+                if let Some(f) = csv_file.as_mut() {
+                    f.write_all(cedar::meter::csv_row(t_us, sample, offset_ua).as_bytes())?;
+                }
             }
             let interval = if tty {
                 Duration::from_millis(250)
@@ -448,7 +574,7 @@ fn meter(
                 last_draw = Some(Instant::now());
                 draw(&meter, &mut drawn_lines);
             }
-            std::thread::sleep(Duration::from_millis(km003c::POLL_INTERVAL_MS));
+            std::thread::sleep(source.poll_interval());
         }
         Ok(())
     })();

@@ -3,6 +3,8 @@
 A small command-line capture tool for the Cypress / Infineon **CY4500 EZ-PD
 Protocol Analyzer** (USB `04b4:f67e`). It can also record from a ChargerLab
 **POWER-Z KM003C** (USB `5fc9:0063`); see [POWER-Z KM003C](#power-z-km003c).
+`cedar meter` measures low currents with a KM003C or a RuiDeng **TC66 / TC66C**
+(USB `28e9:018a`); see [Measuring low currents](#measuring-low-currents).
 
 It talks to the analyzer over USB, streams USB Power Delivery packets and the
 oscilloscope (VBUS / CC / current) trace, and on <kbd>Ctrl</kbd>+<kbd>C</kbd>
@@ -68,7 +70,7 @@ cedar report a.ccgx3 b.ccgx3 -o compare.html
 cedar dump capture.ccgx3
 cedar dump --events --scope capture.ccgx3
 
-# List attached analyzers (CY4500 and KM003C)
+# List attached analyzers and meters (CY4500, KM003C and TC66)
 cedar list
 
 # Print the analyzer's firmware version
@@ -93,8 +95,9 @@ cedar record capture.html --analyzer km003c
 # KM003C only: also save the raw poll responses (for bug reports / fixtures)
 cedar record capture.html --raw capture.km003c.txt
 
-# KM003C current meter at µA resolution (see "Measuring low currents")
+# Current meter at µA resolution (see "Measuring low currents")
 cedar meter --limit 2.5mA
+cedar meter --limit 2.5mA --device tc66
 ```
 
 A capture runs until you press <kbd>Ctrl</kbd>+<kbd>C</kbd>, at which point the
@@ -128,6 +131,10 @@ Then run `cedar` without `sudo`.
 
 For the KM003C, install `contrib/71-powerz-km003c.rules` instead (see the
 comment in the file).
+
+The TC66 is a USB serial device (`/dev/ttyACM*`), so it needs no rule: add
+yourself to the group that owns the port (usually `dialout`) with
+`sudo usermod -aG dialout $USER` and log in again.
 
 The rules grant access with systemd's `uaccess` tag, which only takes effect
 from a rules file that sorts before `73-seat-late.rules`. Earlier versions
@@ -178,7 +185,27 @@ example by suspending the host or enabling runtime autosuspend for the device
 device really is suspended before trusting the number.
 
 The web UI has the same meter on its **Current meter** page, with a live
-trace of the last 30 s, a **Zero** button, and CSV export.
+trace of the last 30 s, a **Zero** button, and CSV export (KM003C only).
+
+### TC66 / TC66C
+
+`cedar meter --device tc66` uses a RuiDeng TC66 or TC66C instead; without
+`--device`, cedar uses a KM003C if one is attached and a TC66 otherwise. The
+TC66 is a USB serial device: cedar finds its port by USB ID and polls its
+`getva` reading (AES-encrypted with a fixed key, three CRC-checked blocks).
+It is much coarser than the KM003C:
+
+- It refreshes about **twice a second**, in **10 µA** current steps and
+  100 µV voltage steps, so a 1 s window holds only about two readings and
+  short spikes go unseen. cedar polls ten times a second and keeps a reading
+  when it changes (or after 0.75 s without a change), so readings are timed
+  to about 0.1 s.
+- It has no 1 s average of its own, so there is no "meter 1 s avg" line and
+  the CSV's `meter_avg_ma` column is empty.
+- It reports the current's magnitude only, not its direction.
+
+It is fine for spotting a device that is clearly over or under a limit; use a
+KM003C for anything close to it.
 
 ## POWER-Z KM003C
 

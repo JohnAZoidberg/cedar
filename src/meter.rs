@@ -1,10 +1,11 @@
 //! Current-measurement statistics for `cedar meter` and the web UI's meter
-//! page, fed with KM003C measurement blocks ([`AdcSample`]).
+//! page, fed with [`Sample`]s from a KM003C measurement block
+//! ([`AdcSample`], ~100 Hz) or a TC66 reading ([`Measurement`], ~2 Hz).
 //!
 //! Low-power limits such as the USB 2.0 suspend current (2.5 mA) apply to
 //! the average over a window (1 s for suspend), not to single readings, so the
-//! meter keeps a rolling window average of cedar's ~100 Hz readings and the
-//! worst window seen so far, plus the running mean, spread and extremes.
+//! meter keeps a rolling window average of the readings and the worst window
+//! seen so far, plus the running mean, spread and extremes.
 //!
 //! The KM003C also reports its own 1 s block average, presumably computed
 //! from its full internal sample rate; the worst of those is tracked as a
@@ -12,14 +13,44 @@
 //! a zero offset subtracted: measure it with nothing attached and pass it
 //! back in.
 //!
-//! Times are supplied by the caller (µs on any monotonic clock): the KM003C's
-//! measurement block carries no timestamp, and the CLI and the browser use
-//! different clocks.
+//! Times are supplied by the caller (µs on any monotonic clock): neither
+//! meter timestamps its readings, and the CLI and the browser use different
+//! clocks.
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 
 use crate::km003c::AdcSample;
+use crate::tc66::Measurement;
+
+/// One reading from any supported meter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sample {
+    pub vbus_uv: i32,
+    pub ibus_ua: i32,
+    /// The meter's own 1 s block average, if it reports one (KM003C only).
+    pub ibus_avg_ua: Option<i32>,
+}
+
+impl From<AdcSample> for Sample {
+    fn from(s: AdcSample) -> Self {
+        Sample {
+            vbus_uv: s.vbus_uv,
+            ibus_ua: s.ibus_ua,
+            ibus_avg_ua: Some(s.ibus_avg_ua),
+        }
+    }
+}
+
+impl From<&Measurement> for Sample {
+    fn from(m: &Measurement) -> Self {
+        Sample {
+            vbus_uv: m.vbus_uv,
+            ibus_ua: m.ibus_ua,
+            ibus_avg_ua: None,
+        }
+    }
+}
 
 /// The default averaging window: the USB suspend current is averaged over 1 s.
 pub const DEFAULT_WINDOW_US: u64 = 1_000_000;
@@ -46,7 +77,7 @@ pub struct Meter {
     /// Whether the meter's average has changed since the first reading, i.e.
     /// now covers a second that began after the start.
     meter_avg_fresh: bool,
-    last: Option<(u64, AdcSample)>,
+    last: Option<(u64, Sample)>,
 }
 
 /// How the worst window compares with a limit.
@@ -79,8 +110,8 @@ pub struct Reading {
     pub rate_hz: f64,
     pub vbus_v: f64,
     pub ibus_ua: f64,
-    /// The meter's own 1 s average (updates once a second).
-    pub meter_avg_ua: f64,
+    /// The meter's own 1 s average (updates once a second), if it reports one.
+    pub meter_avg_ua: Option<f64>,
     /// Average over the window ending now; `None` until a full window has
     /// been measured.
     pub window_ua: Option<f64>,
@@ -156,7 +187,8 @@ impl Meter {
     }
 
     /// Add a reading taken at `t_us`.
-    pub fn push(&mut self, t_us: u64, s: AdcSample) {
+    pub fn push(&mut self, t_us: u64, s: impl Into<Sample>) {
+        let s: Sample = s.into();
         let start = *self.start_us.get_or_insert(t_us);
         self.window.push_back((t_us, s.ibus_ua));
         self.window_sum += s.ibus_ua as i64;
@@ -192,8 +224,8 @@ impl Meter {
         if let Some((_, prev)) = self.last {
             self.meter_avg_fresh |= prev.ibus_avg_ua != s.ibus_avg_ua;
         }
-        if self.meter_avg_fresh {
-            let avg = (s.ibus_avg_ua as f64 - self.offset_ua).abs();
+        if let (true, Some(avg)) = (self.meter_avg_fresh, s.ibus_avg_ua) {
+            let avg = (avg as f64 - self.offset_ua).abs();
             self.worst_meter = Some(self.worst_meter.map_or(avg, |w| w.max(avg)));
         }
         self.last = Some((t_us, s));
@@ -241,7 +273,7 @@ impl Meter {
             },
             vbus_v: s.vbus_uv as f64 / 1e6,
             ibus_ua: s.ibus_ua as f64 - self.offset_ua,
-            meter_avg_ua: s.ibus_avg_ua as f64 - self.offset_ua,
+            meter_avg_ua: s.ibus_avg_ua.map(|a| a as f64 - self.offset_ua),
             window_ua: self.window_avg(t),
             mean_ua: self.mean,
             std_ua: if self.n > 1 {
@@ -267,7 +299,7 @@ impl Reading {
         format!(
             concat!(
                 "{{\"elapsed\":{:.3},\"samples\":{},\"rate\":{:.1},\"vbus\":{:.6},",
-                "\"ibus\":{:.1},\"meterAvg\":{:.1},\"window\":{},",
+                "\"ibus\":{:.1},\"meterAvg\":{},\"window\":{},",
                 "\"mean\":{:.1},\"std\":{:.1},\"min\":{:.1},\"max\":{:.1},",
                 "\"worst\":{},\"worstAt\":{},\"worstMeter\":{},",
                 "\"offset\":{:.1},\"windowS\":{}}}"
@@ -277,7 +309,7 @@ impl Reading {
             self.rate_hz,
             self.vbus_v,
             self.ibus_ua,
-            self.meter_avg_ua,
+            opt(self.meter_avg_ua),
             opt(self.window_ua),
             self.mean_ua,
             self.std_ua,
@@ -297,10 +329,11 @@ impl Reading {
         let w = fmt_secs(self.window_s);
         vec![
             format!(
-                "  now: {}   {w} avg: {}   meter 1 s avg: {}   VBUS {:.3} V",
+                "  now: {}   {w} avg: {}{}   VBUS {:.3} V",
                 ma(self.ibus_ua),
                 self.window_ua.map_or("(filling)".to_string(), ma),
-                ma(self.meter_avg_ua),
+                self.meter_avg_ua
+                    .map_or(String::new(), |a| format!("   meter 1 s avg: {}", ma(a))),
                 self.vbus_v,
             ),
             format!(
@@ -311,11 +344,17 @@ impl Reading {
                 ma(self.max_ua),
             ),
             format!(
-                "  worst {w} avg: {}{}   worst meter 1 s avg: {}",
+                "  worst {w} avg: {}{}{}",
                 self.worst_ua.map_or("(filling)".to_string(), ma),
                 self.worst_at_s
                     .map_or(String::new(), |t| format!(" at {t:.1} s")),
-                self.worst_meter_ua.map_or("(waiting)".to_string(), ma),
+                match (self.meter_avg_ua, self.worst_meter_ua) {
+                    (None, _) => String::new(),
+                    (Some(_), w) => format!(
+                        "   worst meter 1 s avg: {}",
+                        w.map_or("(waiting)".to_string(), ma)
+                    ),
+                },
             ),
             format!(
                 "  {}   offset: {}   {} readings, {:.0}/s, {:.0} s",
@@ -420,15 +459,18 @@ pub fn parse_current(s: &str) -> Result<f64, String> {
 pub const CSV_HEADER: &str = "time_s,vbus_v,ibus_ma,ibus_corrected_ma,meter_avg_ma\n";
 
 /// One CSV row for a reading taken `elapsed_us` after the start; `offset_ua`
-/// is subtracted in the corrected column.
-pub fn csv_row(elapsed_us: u64, s: &AdcSample, offset_ua: f64) -> String {
+/// is subtracted in the corrected column. `meter_avg_ma` is empty for meters
+/// without their own average.
+pub fn csv_row(elapsed_us: u64, s: impl Into<Sample>, offset_ua: f64) -> String {
+    let s: Sample = s.into();
     format!(
-        "{:.6},{:.6},{:.3},{:.3},{:.3}\n",
+        "{:.6},{:.6},{:.3},{:.3},{}\n",
         elapsed_us as f64 / 1e6,
         s.vbus_uv as f64 / 1e6,
         s.ibus_ua as f64 / 1000.0,
         (s.ibus_ua as f64 - offset_ua) / 1000.0,
-        s.ibus_avg_ua as f64 / 1000.0,
+        s.ibus_avg_ua
+            .map_or(String::new(), |a| format!("{:.3}", a as f64 / 1000.0)),
     )
 }
 
