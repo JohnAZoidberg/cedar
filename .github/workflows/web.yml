@@ -38,7 +38,7 @@ jobs:
       - name: Check the site's files exist
         run: |
           test -s dist/index.html
-          for f in 'app-*.js' 'meter.js' 'style-*.css' 'cedar-web-*.js' 'cedar-web-*_bg.wasm'; do
+          for f in 'app-*.js' 'meter.js' 'tc66.js' 'style-*.css' 'cedar-web-*.js' 'cedar-web-*_bg.wasm'; do
             ls dist/$f > /dev/null || { echo "missing dist/$f"; exit 1; }
           done
       - name: Upload Pages artifact

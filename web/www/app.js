@@ -394,8 +394,9 @@ function setDevice(name, detail) {
 function render() {
   const recording = state === "recording" || state === "stopping";
   const busy = state === "starting" || state === "stopping";
-  // The current meter uses the same KM003C; one or the other runs.
-  const measuring = meterView?.busy ?? false;
+  // A current meter on the same KM003C: one or the other runs. (A TC66 is a
+  // separate device and doesn't get in the way.)
+  const measuring = meterView?.holdsAnalyzer ?? false;
   $("btn-record").hidden = recording;
   $("btn-stop").hidden = !recording;
   $("btn-record").disabled = !analyzer || busy || measuring;
@@ -502,7 +503,7 @@ function resetLive() {
 }
 
 async function startRecording() {
-  if (!analyzer || state !== "ready" || meterView.busy) return;
+  if (!analyzer || state !== "ready" || meterView.holdsAnalyzer) return;
   if (results?.recorded && !results.saved && !confirm("Discard the capture you haven't saved?")) return;
   freeResults();
   showError("");
@@ -840,7 +841,9 @@ if (!("usb" in navigator)) {
     if (state === "recording") {
       await stopRecording("The analyzer was unplugged. The capture up to that point is below.");
     }
-    await meterView.stop("The meter was unplugged. Its figures up to that point are kept.");
+    if (meterView.holdsAnalyzer) {
+      await meterView.stop("The meter was unplugged. Its figures up to that point are kept.");
+    }
     analyzer = null;
     state = "idle";
     setDevice("No analyzer selected", "Plug in a CY4500 or KM003C, then choose it.");

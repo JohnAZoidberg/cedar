@@ -239,6 +239,8 @@ code { font-size: .95em; }
   }
 }
 .meter-readout .value > span:first-child { min-width: 0; }
+/* A meter without its own 1 s average (TC66) shows two figures. */
+.meter-readout.no-own-avg { grid-template-columns: repeat(2, minmax(0, 1fr)) minmax(170px, .8fr); }
 .limit-bar {
   display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px 16px;
   padding: 14px 18px; border-top: 1px solid var(--grid);
@@ -309,6 +311,8 @@ code { font-size: .95em; }
   .meter-readout .figure:not(:first-child) .value { font-size: 30px; }
   .meter-readout .figure:nth-child(2) { grid-column: span 1; }
   .meter-readout .figure:nth-child(3) { grid-column: span 2; }
+  .meter-readout.no-own-avg { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .meter-readout.no-own-avg .figure:nth-child(2) { grid-column: span 3; }
   .limit-bar .field { flex: 1; }
   #m-limit, #m-window-s { width: 100%; }
   .tool-buttons .button { flex: 1; }

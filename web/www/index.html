@@ -12,14 +12,15 @@
 <link data-trunk rel="rust" href="../Cargo.toml" data-bindgen-target="web">
 <link data-trunk rel="css" href="style.css">
 <script data-trunk type="module" src="app.js"></script>
-<!-- Imported by app.js; Trunk doesn't follow imports, so copy it as is. -->
+<!-- Imported by app.js; Trunk doesn't follow imports, so copy them as is. -->
 <link data-trunk rel="copy-file" href="meter.js">
+<link data-trunk rel="copy-file" href="tc66.js">
 </head>
 <body>
 <header class="top">
   <div class="brand">
     <h1>cedar</h1>
-    <p>USB Power Delivery capture and current measurement for the CY4500 EZ-PD Analyzer and POWER-Z KM003C</p>
+    <p>USB Power Delivery capture and current measurement for the CY4500 EZ-PD Analyzer, POWER-Z KM003C and TC66</p>
   </div>
   <nav class="views" aria-label="Views">
     <a id="nav-capture" href="#capture" aria-current="page">PD capture</a>
@@ -133,11 +134,12 @@
         <span id="m-dot" class="dot" aria-hidden="true"></span>
         <div>
           <div id="m-device-name" class="device-name">No meter selected</div>
-          <div id="m-device-detail" class="device-detail">Plug in a POWER-Z KM003C, then choose it.</div>
+          <div id="m-device-detail" class="device-detail">Plug in a POWER-Z KM003C or TC66, then choose it.</div>
         </div>
       </div>
       <div class="actions">
-        <button id="m-choose" type="button" class="button">Choose meter</button>
+        <button id="m-choose" type="button" class="button">Choose KM003C</button>
+        <button id="m-choose-tc66" type="button" class="button" hidden>Choose TC66</button>
         <button id="m-start" type="button" class="button primary" disabled>Start</button>
         <button id="m-stop" type="button" class="button stop" hidden>Stop</button>
       </div>
@@ -152,7 +154,7 @@
         <div class="value"><span id="m-now">0.000</span><span class="unit">mA</span></div>
         <div class="label">Now</div>
       </div>
-      <div class="figure">
+      <div id="m-meteravg-fig" class="figure">
         <div class="value"><span id="m-meteravg">0.000</span><span class="unit">mA</span></div>
         <div class="label" title="The KM003C's own 1 s average, from its full internal sample rate. Updates once a second.">Meter's 1 s average</div>
       </div>
@@ -217,8 +219,10 @@
       <p class="hint">
         To zero the meter, disconnect the device under test from it, measure for
         a few seconds, then press <b>Zero</b>. The offset is kept in this browser.
-        Negative currents mean power flows from the meter's male to its female
-        port. The command-line equivalent is <code>cedar meter --limit 2.5mA</code>.
+        Negative currents mean power flows from the KM003C's male to its female
+        port. A TC66 is much coarser: 10 µA steps, about two readings a second,
+        current magnitude only. The command-line equivalent is
+        <code>cedar meter --limit 2.5mA</code>.
       </p>
     </div>
   </section>

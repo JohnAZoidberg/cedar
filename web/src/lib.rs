@@ -1,17 +1,19 @@
 //! WebAssembly bindings for the cedar web UI.
 //!
-//! The browser owns the USB I/O (WebUSB is promise-based and has no read
-//! timeouts, so the transfer loops live in JavaScript); everything else — the
-//! CY4500 record decoder, the KM003C request framing and event conversion,
-//! session analysis, `.ccgx3`/`.csv`/HTML output and the text dump — is the
-//! same Rust code the command-line tool runs.
+//! The browser owns the USB and serial I/O (WebUSB and Web Serial are
+//! promise-based and have no read timeouts, so the transfer loops live in
+//! JavaScript); everything else — the CY4500 record decoder, the KM003C request
+//! framing and event conversion, TC66 decryption, session analysis, the
+//! current meter, `.ccgx3`/`.csv`/HTML output and the text dump — is the same
+//! Rust code the command-line tool runs.
 
 use std::fmt::Write as _;
 
 use cedar::km003c::{self, Command, Converter};
-use cedar::meter::{self, Meter};
+use cedar::meter::{self, Meter, Sample};
 use cedar::pd_session::{analyze, Session};
 use cedar::protocol::{self, Decoder, GraphSample, Packet};
+use cedar::tc66;
 use cedar::{dump, reader, report, writer};
 use wasm_bindgen::prelude::*;
 
@@ -32,7 +34,7 @@ fn start() {
 /// live view only shows the tail of a capture.
 const MAX_LIVE_ROWS: usize = 500;
 
-/// USB identifiers and endpoints for both analyzers, as JSON, so the
+/// USB identifiers and endpoints for the analyzers and meters, as JSON, so the
 /// JavaScript transport has a single source of truth.
 #[wasm_bindgen(js_name = deviceInfo)]
 pub fn device_info() -> String {
@@ -41,7 +43,8 @@ pub fn device_info() -> String {
             "{{\"cy4500\":{{\"vid\":{},\"pid\":{},\"pidFirmware\":{},\"epOut\":{},",
             "\"epData\":{},\"epScope\":{},\"epResp\":{},\"maxRead\":{},\"maxScopeRead\":{}}},",
             "\"km003c\":{{\"vid\":{},\"pid\":{},\"interface\":{},\"epOut\":{},\"epIn\":{},",
-            "\"pollMs\":{}}}}}"
+            "\"pollMs\":{}}},",
+            "\"tc66\":{{\"vid\":{},\"pid\":{},\"replySize\":{},\"pollMs\":{}}}}}"
         ),
         protocol::VID,
         protocol::PID,
@@ -58,6 +61,10 @@ pub fn device_info() -> String {
         km003c::EP_OUT,
         km003c::EP_IN & 0x7f,
         km003c::POLL_INTERVAL_MS,
+        tc66::VID,
+        tc66::PID,
+        tc66::RESPONSE_SIZE,
+        tc66::POLL_INTERVAL_MS,
     )
 }
 
@@ -301,14 +308,16 @@ pub fn parse_current(s: &str) -> Result<f64, JsError> {
     meter::parse_current(s).map_err(|e| JsError::new(&e))
 }
 
-/// KM003C current measurement, as `cedar meter`: feed it `adc` responses and
-/// read back the windowed statistics. Every reading is also kept as a CSV row.
+/// Current measurement, as `cedar meter`: feed it KM003C `adc` responses or
+/// TC66 `getva` replies and read back the windowed statistics. Every reading
+/// is also kept as a CSV row.
 #[wasm_bindgen(js_name = CurrentMeter)]
 pub struct CurrentMeter {
     meter: Meter,
     /// Time of the first reading since the last reset, in ms.
     start_ms: Option<f64>,
     csv: String,
+    tc66: tc66::RefreshFilter,
 }
 
 #[wasm_bindgen(js_class = CurrentMeter)]
@@ -320,19 +329,38 @@ impl CurrentMeter {
             meter: Meter::new(window_us(window_s), offset_ua),
             start_ms: None,
             csv: String::new(),
+            tc66: tc66::RefreshFilter::new(),
         }
     }
 
-    /// Feed one complete `adc` response read at `t_ms` (any monotonic clock,
-    /// e.g. `performance.now()`).
+    /// Feed one complete KM003C `adc` response read at `t_ms` (any monotonic
+    /// clock, e.g. `performance.now()`).
     pub fn feed(&mut self, resp: &[u8], t_ms: f64) -> Result<(), JsError> {
         let sample = km003c::adc_sample(resp).map_err(js_err)?;
+        self.push(sample.into(), t_ms);
+        Ok(())
+    }
+
+    /// Feed one TC66 `getva` reply read at `t_ms`. The TC66 repeats its
+    /// reading between refreshes (about twice a second); returns whether this
+    /// one was new and taken.
+    #[wasm_bindgen(js_name = feedTc66)]
+    pub fn feed_tc66(&mut self, resp: &[u8], t_ms: f64) -> Result<bool, JsError> {
+        let m = tc66::parse(resp).map_err(js_err)?;
+        let t_us = (t_ms.max(0.0) * 1000.0).round() as u64;
+        if !self.tc66.is_new(&m, t_us) {
+            return Ok(false);
+        }
+        self.push((&m).into(), t_ms);
+        Ok(true)
+    }
+
+    fn push(&mut self, sample: Sample, t_ms: f64) {
         let start = *self.start_ms.get_or_insert(t_ms);
         let t_us = ((t_ms - start).max(0.0) * 1000.0).round() as u64;
         self.meter.push(t_us, sample);
         self.csv
             .push_str(&meter::csv_row(t_us, sample, self.meter.offset_ua()));
-        Ok(())
     }
 
     /// The current figures as JSON (µA, see `cedar::meter::Reading`), or
@@ -390,6 +418,7 @@ impl CurrentMeter {
     fn restart(&mut self) {
         self.start_ms = None;
         self.csv.clear();
+        self.tc66 = tc66::RefreshFilter::new();
     }
 }
 

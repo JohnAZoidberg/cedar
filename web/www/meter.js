@@ -1,7 +1,10 @@
 // cedar web UI: the current-meter view. Polls a POWER-Z KM003C's measurement
-// block (µA resolution) and shows the rolling window average against a limit,
-// as `cedar meter` does. The statistics come from the Rust core
-// (CurrentMeter in web/src/lib.rs, src/meter.rs); this module is the view.
+// block (µA resolution, over WebUSB) or a TC66's readings (10 µA, over Web
+// Serial) and shows the rolling window average against a limit, as `cedar
+// meter` does. The statistics come from the Rust core (CurrentMeter in
+// web/src/lib.rs, src/meter.rs); this module is the view.
+
+import { Tc66 } from "./tc66.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -47,16 +50,23 @@ const fmtWindow = (s) => `${Number(s.toFixed(2))} s`;
  *   meter()       the selected analyzer if it is a KM003C, else null
  *   other()       the selected analyzer's name if it isn't a KM003C, else null
  *   choose()      ask the browser for a KM003C and select it
- *   captureBusy() whether a PD capture is running (the meter can't start)
+ *   captureBusy() whether a PD capture is running (the KM003C can't measure)
+ *
+ * A TC66 is a serial port, separate from the selected analyzer, so the view
+ * manages it here; it can measure while the analyzer records.
  *   changed()     the meter started or stopped (the capture view re-renders)
  *   showError(t)  show (or with "" clear) the page's error notice
  *   download(name, data, type), stamp(), errorText(e)
  */
 export function setupMeter(host) {
   const { wasm } = host;
+  const TC66 = JSON.parse(wasm.deviceInfo()).tc66;
+  const hasSerial = "serial" in navigator;
   let state = "idle"; // idle | starting | measuring | stopping
   let meter = null; // wasm CurrentMeter: kept after Stop for the figures and CSV
-  let device = null; // the Km003c being polled
+  let device = null; // the Km003c or Tc66 being polled
+  let tc66 = null; // a TC66 this page may use (a Tc66), if any
+  let preferTc66 = false; // the TC66 was chosen last (else the KM003C wins, as in the CLI)
   let timer = null;
   let trace = []; // {t, i, w}: elapsed s, reading µA, window average µA or null
   let last = null; // the latest reading (JSON from the core)
@@ -93,9 +103,18 @@ export function setupMeter(host) {
 
   const busy = () => state !== "idle";
 
-  async function start() {
+  /** The meter to measure with: the KM003C analyzer or the TC66. */
+  function source() {
     const km = host.meter();
-    if (!km || busy() || host.captureBusy()) return;
+    return preferTc66 ? (tc66 ?? km) : (km ?? tc66);
+  }
+
+  /** Whether `src` is free to start (the KM003C is shared with PD capture). */
+  const canStart = (src) => src && !busy() && !(src.kind === "km003c" && host.captureBusy());
+
+  async function start() {
+    const km = source();
+    if (!canStart(km)) return;
     host.showError("");
     meter?.free();
     meter = new wasm.CurrentMeter(readWindow(), offsetUa);
@@ -108,7 +127,12 @@ export function setupMeter(host) {
     try {
       await km.startMeter(
         (resp, tMs) => {
-          meter.feed(resp, tMs);
+          if (km.kind === "tc66") {
+            // The TC66 repeats its reading between refreshes; skip repeats.
+            if (!meter.feedTc66(resp, tMs)) return;
+          } else {
+            meter.feed(resp, tMs);
+          }
           const r = JSON.parse(meter.readingJson());
           trace.push({ t: r.elapsed, i: r.ibus, w: r.window });
           if (trace.length > TRACE_MAX) trace.splice(0, trace.length - TRACE_MAX);
@@ -170,34 +194,42 @@ export function setupMeter(host) {
 
   /** Device bar and buttons. */
   function render() {
-    const km = host.meter();
+    const km = busy() ? device : source();
     const measuring = state === "measuring" || state === "stopping";
     const other = host.other();
+    const coarse = km?.kind === "tc66" ? " (10 µA steps, about two readings a second)" : "";
     $("m-device-name").textContent = km ? km.name : other ?? "No meter selected";
     $("m-device-detail").textContent =
       state === "starting"
         ? "Starting…"
         : measuring
-          ? "Measuring."
+          ? `Measuring${coarse}.`
           : km
-            ? host.captureBusy()
+            ? km.kind === "km003c" && host.captureBusy()
               ? "Recording a PD capture. Stop it to measure."
-              : "Ready to measure."
+              : `Ready to measure${coarse}.`
             : other
-              ? "The current meter needs a POWER-Z KM003C."
-              : "Plug in a POWER-Z KM003C, then choose it.";
+              ? "The current meter needs a POWER-Z KM003C or a TC66."
+              : "Plug in a POWER-Z KM003C or TC66, then choose it.";
     $("m-dot").className = "dot" + (measuring ? " live" : km ? " ready" : "");
     $("m-start").hidden = measuring;
     $("m-stop").hidden = !measuring;
-    $("m-start").disabled = !km || busy() || host.captureBusy();
+    $("m-start").disabled = !canStart(km);
     $("m-stop").disabled = state === "stopping";
     $("m-choose").disabled = busy() || host.captureBusy() || !("usb" in navigator);
+    $("m-choose-tc66").hidden = !hasSerial;
+    $("m-choose-tc66").disabled = busy();
+    // Only the KM003C reports its own 1 s average.
+    const ownAvg = last ? last.meterAvg !== null : km?.kind !== "tc66";
+    $("m-meteravg-fig").hidden = !ownAvg;
     $("m-window-s").disabled = busy();
     $("m-zero").disabled = !(measuring && last && last.samples > 1);
     $("m-reset").disabled = !(measuring && last);
     $("m-clear-zero").hidden = !offsetUa;
     $("m-csv").disabled = !meter || !last;
-    document.querySelector(".meter-readout").classList.toggle("idle", !measuring);
+    const readout = document.querySelector(".meter-readout");
+    readout.classList.toggle("idle", !measuring);
+    readout.classList.toggle("no-own-avg", !ownAvg);
   }
 
   /** Figures, verdict and trace. */
@@ -222,7 +254,7 @@ export function setupMeter(host) {
     } else {
       $("m-window").textContent = r.window === null ? "…" : mA(r.window);
       $("m-now").textContent = mA(r.ibus);
-      $("m-meteravg").textContent = mA(r.meterAvg);
+      $("m-meteravg").textContent = r.meterAvg === null ? "–" : mA(r.meterAvg);
       $("m-vbus").textContent = `${r.vbus.toFixed(3)} V`;
       $("m-readings").textContent = `${r.samples.toLocaleString()} (${Math.round(r.rate)}/s)`;
       $("m-elapsed").textContent = fmtElapsed(r.elapsed);
@@ -232,7 +264,12 @@ export function setupMeter(host) {
       $("m-max").textContent = mAUnit(r.max);
       $("m-worst").textContent =
         r.worst === null ? `waiting for ${win}` : `${mAUnit(r.worst)} at ${r.worstAt.toFixed(1)} s`;
-      $("m-worst-meter").textContent = r.worstMeter === null ? "waiting" : mAUnit(r.worstMeter);
+      $("m-worst-meter").textContent =
+        r.meterAvg === null
+          ? "not reported by the TC66"
+          : r.worstMeter === null
+            ? "waiting"
+            : mAUnit(r.worstMeter);
     }
     renderVerdict(r, win);
     renderTrace();
@@ -402,9 +439,60 @@ export function setupMeter(host) {
   });
   window.addEventListener("resize", renderTrace);
 
+  // --- TC66 (Web Serial) ----------------------------------------------------
+
+  /** Use `port` as the TC66. `chosen`: picked by the user, so prefer it. */
+  function adoptTc66(port, chosen) {
+    if (busy() && device === tc66) return;
+    if (!tc66 || tc66.port !== port) tc66 = new Tc66(port, TC66);
+    if (chosen) preferTc66 = true;
+    host.showError("");
+    render();
+  }
+
+  async function chooseTc66() {
+    let port;
+    try {
+      port = await navigator.serial.requestPort({
+        filters: [{ usbVendorId: TC66.vid, usbProductId: TC66.pid }],
+      });
+    } catch (e) {
+      if (e?.name !== "NotFoundError") host.showError(host.errorText(e)); // NotFoundError: cancelled
+      return;
+    }
+    adoptTc66(port, true);
+  }
+
+  async function chooseKm003c() {
+    preferTc66 = false;
+    render();
+    await host.choose();
+  }
+
+  if (hasSerial) {
+    navigator.serial.addEventListener("connect", (e) => {
+      if (!tc66 && Tc66.matches(e.target, TC66)) adoptTc66(e.target, false);
+    });
+    navigator.serial.addEventListener("disconnect", async (e) => {
+      if (!tc66 || e.target !== tc66.port) return;
+      if (device === tc66) await stop("The TC66 was unplugged. Its figures up to that point are kept.");
+      tc66 = null;
+      render();
+    });
+    // Reconnect to a TC66 this site was already allowed to use.
+    navigator.serial
+      .getPorts()
+      .then((ports) => {
+        const port = ports.find((p) => Tc66.matches(p, TC66));
+        if (port && !tc66) adoptTc66(port, false);
+      })
+      .catch(() => {});
+  }
+
   // --- Wiring -------------------------------------------------------------
 
-  $("m-choose").addEventListener("click", host.choose);
+  $("m-choose").addEventListener("click", chooseKm003c);
+  $("m-choose-tc66").addEventListener("click", chooseTc66);
   $("m-start").addEventListener("click", start);
   $("m-stop").addEventListener("click", () => stop());
   $("m-zero").addEventListener("click", zero);
@@ -425,6 +513,10 @@ export function setupMeter(host) {
   return {
     get busy() {
       return busy();
+    },
+    /** Whether the meter is measuring with the selected (KM003C) analyzer. */
+    get holdsAnalyzer() {
+      return busy() && device !== null && device === host.meter();
     },
     render,
     /** Re-draw once the view is visible (the trace needs its size). */

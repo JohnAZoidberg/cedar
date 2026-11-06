@@ -185,7 +185,7 @@ example by suspending the host or enabling runtime autosuspend for the device
 device really is suspended before trusting the number.
 
 The web UI has the same meter on its **Current meter** page, with a live
-trace of the last 30 s, a **Zero** button, and CSV export (KM003C only).
+trace of the last 30 s, a **Zero** button, and CSV export.
 
 ### TC66 / TC66C
 
@@ -205,7 +205,8 @@ It is much coarser than the KM003C:
 - It reports the current's magnitude only, not its direction.
 
 It is fine for spotting a device that is clearly over or under a limit; use a
-KM003C for anything close to it.
+KM003C for anything close to it. The web UI's **Current meter** page supports
+the TC66 too (see [Web UI](#web-ui)).
 
 ## POWER-Z KM003C
 
@@ -255,7 +256,10 @@ several to compare them in one report. Files never leave the browser.
 Its **Current meter** page (`#meter`) is `cedar meter` in the browser: the
 window average against a limit, the worst window, statistics, a live trace,
 zeroing (the offset is remembered in the browser), and a CSV of every
-reading.
+reading. It measures with a KM003C (over WebUSB) or a TC66 (over Web Serial;
+**Choose TC66**). As in the CLI, a KM003C wins when both are available
+unless you chose the TC66. The TC66 is a separate device, so it can measure
+while the PD capture page records from a KM003C or CY4500.
 
 It builds with [Trunk](https://trunkrs.dev), as configured in `Trunk.toml`:
 
@@ -268,8 +272,8 @@ trunk serve                    # http://localhost:8080, rebuilds on changes
 `trunk build --release` writes the same static site to `dist/`. Trunk fetches
 the `wasm-bindgen` CLI matching `Cargo.lock` by itself (or uses one on `PATH`
 if the version matches). WebUSB only works on HTTPS pages (or `localhost`) and
-only in Chromium-based browsers (Chrome, Edge, Opera); opening captures works
-in any browser. `.github/workflows/web.yml` builds the site on every push and
+only in Chromium-based browsers (Chrome, Edge, Opera), as does Web Serial;
+opening captures works in any browser. `.github/workflows/web.yml` builds the site on every push and
 deploys `main` to GitHub Pages (set the repository's Pages source to "GitHub
 Actions").
 
@@ -284,7 +288,9 @@ automatically, so on Windows they work without installing a driver. On Linux
 the [udev rules](#linux-permissions) are needed as for the CLI, and the
 kernel's `powerz` driver holds the KM003C's interface; unlike the CLI, the
 browser can't detach it, so release it first with `sudo modprobe -r powerz`
-(or blacklist the module).
+(or blacklist the module). The TC66 needs no driver on any platform; on Linux
+the browser opens its serial port as you, so you need to be in the port's
+group (usually `dialout`) as for the CLI.
 
 ## How it works
 

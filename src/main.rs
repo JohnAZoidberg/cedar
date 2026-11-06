@@ -387,8 +387,8 @@ enum MeterSource {
     Km003c(km003c::Km003c),
     Tc66 {
         meter: tc66::Tc66,
-        /// The last reading passed on, and when it was taken.
-        last: Option<(cedar::meter::Sample, std::time::Instant)>,
+        filter: tc66::RefreshFilter,
+        epoch: std::time::Instant,
     },
 }
 
@@ -416,7 +416,8 @@ impl MeterSource {
         let open_tc66 = |port: String| -> Result<Self> {
             Ok(MeterSource::Tc66 {
                 meter: tc66::Tc66::open(&port)?,
-                last: None,
+                filter: tc66::RefreshFilter::new(),
+                epoch: std::time::Instant::now(),
             })
         };
         match kind {
@@ -451,8 +452,7 @@ impl MeterSource {
     fn poll_interval(&self) -> std::time::Duration {
         std::time::Duration::from_millis(match self {
             MeterSource::Km003c(_) => km003c::POLL_INTERVAL_MS,
-            // Several polls per refresh, so readings are timed to ~0.1 s.
-            MeterSource::Tc66 { .. } => 100,
+            MeterSource::Tc66 { .. } => tc66::POLL_INTERVAL_MS,
         })
     }
 
@@ -461,23 +461,14 @@ impl MeterSource {
     fn poll(&mut self) -> Result<Option<cedar::meter::Sample>> {
         match self {
             MeterSource::Km003c(km) => Ok(Some(km.poll_adc()?.into())),
-            MeterSource::Tc66 { meter, last } => {
-                let sample = cedar::meter::Sample::from(&meter.measure()?);
-                let now = std::time::Instant::now();
-                // The TC66 repeats its reading between refreshes (~2 Hz) and
-                // carries no counter: pass on changed readings, and a repeat
-                // once a refresh has surely gone by, so a steady load still
-                // fills the window.
-                let stale = std::time::Duration::from_millis(tc66::UPDATE_INTERVAL_MS * 3 / 2);
-                let fresh = match last {
-                    None => true,
-                    Some((prev, at)) => *prev != sample || now.duration_since(*at) >= stale,
-                };
-                if !fresh {
-                    return Ok(None);
-                }
-                *last = Some((sample, now));
-                Ok(Some(sample))
+            MeterSource::Tc66 {
+                meter,
+                filter,
+                epoch,
+            } => {
+                let m = meter.measure()?;
+                let t_us = epoch.elapsed().as_micros() as u64;
+                Ok(filter.is_new(&m, t_us).then(|| (&m).into()))
             }
         }
     }

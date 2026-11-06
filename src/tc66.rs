@@ -35,6 +35,13 @@ pub const RESPONSE_SIZE: usize = 192;
 /// The meter refreshes its readings about this often, in ms.
 pub const UPDATE_INTERVAL_MS: u64 = 500;
 
+/// Pause between polls, in ms: several per refresh, so readings are timed to
+/// about 0.1 s.
+pub const POLL_INTERVAL_MS: u64 = 100;
+
+/// After this long without a change, a repeated reading counts as new.
+const STALE_US: u64 = UPDATE_INTERVAL_MS * 3 / 2 * 1000;
+
 const KEY: [u8; 32] = [
     0x58, 0x21, 0xfa, 0x56, 0x01, 0xb2, 0xf0, 0x26, 0x87, 0xff, 0x12, 0x04, 0x62, 0x2a, 0x4f, 0xb0,
     0x86, 0xf4, 0x02, 0x60, 0x81, 0x6f, 0x9a, 0x0b, 0xa7, 0xf1, 0x06, 0x61, 0x9a, 0xb8, 0x72, 0x88,
@@ -64,6 +71,37 @@ pub struct Measurement {
     pub temperature_c: i32,
     pub dp_mv: u32,
     pub dm_mv: u32,
+}
+
+/// Picks the meter's refreshes out of repeated polls.
+///
+/// The TC66 repeats its reading between refreshes and carries no counter, so
+/// a reading counts as new when it differs from the last one passed on, or
+/// once a refresh has surely gone by since (so a steady load still fills the
+/// averaging window, without counting each poll as a reading).
+#[derive(Debug, Clone, Default)]
+pub struct RefreshFilter {
+    last: Option<((i32, i32, i32), u64)>,
+}
+
+impl RefreshFilter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether `m`, polled at `t_us` (µs on any monotonic clock), is a new
+    /// reading. If so, it becomes the one later polls are compared with.
+    pub fn is_new(&mut self, m: &Measurement, t_us: u64) -> bool {
+        let key = (m.vbus_uv, m.ibus_ua, m.power_uw);
+        let new = match self.last {
+            None => true,
+            Some((last, at)) => last != key || t_us.saturating_sub(at) >= STALE_US,
+        };
+        if new {
+            self.last = Some((key, t_us));
+        }
+        new
+    }
 }
 
 /// Decrypt a `getva` reply in place and check its block tags and CRCs.
@@ -231,6 +269,22 @@ mod tests {
         assert_eq!(m.groups, [(8, 43), (0, 0)]);
         assert_eq!(m.temperature_c, 22);
         assert_eq!((m.dp_mv, m.dm_mv), (2130, 2800));
+    }
+
+    #[test]
+    fn refresh_filter() {
+        let mut m = parse(&reply(&[(48, 50000), (52, 1000)])).unwrap();
+        let mut f = RefreshFilter::new();
+        assert!(f.is_new(&m, 0));
+        assert!(!f.is_new(&m, 100_000));
+        assert!(!f.is_new(&m, 700_000));
+        // A repeat counts once a refresh has surely gone by...
+        assert!(f.is_new(&m, 750_000));
+        assert!(!f.is_new(&m, 850_000));
+        // ...and a change counts at once.
+        m.ibus_ua += 10;
+        assert!(f.is_new(&m, 900_000));
+        assert!(!f.is_new(&m, 1_000_000));
     }
 
     #[test]
